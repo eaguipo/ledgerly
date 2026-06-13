@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { signout } from "@/lib/auth/actions";
@@ -38,9 +39,30 @@ export default async function DashboardPage() {
           </div>
         </dl>
 
+        <nav className="mt-6 border-t border-zinc-200 pt-4 dark:border-zinc-800">
+          <Link
+            href="/portfolios"
+            className="flex items-center justify-between rounded-lg px-3 py-2 text-sm font-medium text-zinc-900 transition hover:bg-zinc-50 dark:text-zinc-50 dark:hover:bg-zinc-900"
+          >
+            Portfolios
+            <span aria-hidden className="text-zinc-400">
+              →
+            </span>
+          </Link>
+          <Link
+            href="/expenses"
+            className="flex items-center justify-between rounded-lg px-3 py-2 text-sm font-medium text-zinc-900 transition hover:bg-zinc-50 dark:text-zinc-50 dark:hover:bg-zinc-900"
+          >
+            Expenses
+            <span aria-hidden className="text-zinc-400">
+              →
+            </span>
+          </Link>
+        </nav>
+
         <form
           action={signout}
-          className="mt-6 border-t border-zinc-200 pt-4 dark:border-zinc-800"
+          className="mt-2 border-t border-zinc-200 pt-4 dark:border-zinc-800"
         >
           <button
             type="submit"
