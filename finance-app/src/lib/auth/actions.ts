@@ -2,6 +2,7 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
+import { headers } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
 
 /**
@@ -107,7 +108,13 @@ export async function signup(
   }
 
   const supabase = await createClient();
-  const { data, error } = await supabase.auth.signUp({ email, password });
+  const headersList = await headers();
+  const origin = headersList.get("origin") ?? "http://localhost:3000";
+  const { data, error } = await supabase.auth.signUp({
+    email,
+    password,
+    options: { emailRedirectTo: `${origin}/auth/callback` },
+  });
 
   if (error) {
     if (error.code === "user_already_exists" || error.code === "email_exists") {
