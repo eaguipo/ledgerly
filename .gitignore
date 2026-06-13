@@ -1,0 +1,21 @@
+# Secrets — never commit
+.env
+.env.local
+.env*.local
+
+# Node / Next.js (once the app is scaffolded inside this repo)
+node_modules/
+.next/
+out/
+dist/
+build/
+
+# Supabase CLI (if used later)
+.supabase/
+
+# Logs & OS cruft
+*.log
+.DS_Store
+
+# Intermediate design artifact
+.design-meta.json
