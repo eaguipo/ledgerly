@@ -1,0 +1,9 @@
+apiVersion: v2
+name: service
+description: >-
+  Reusable chart for a single Ledgerly HTTP microservice — Deployment + Service
+  plus optional Ingress, HPA, ConfigMap and Secret. The umbrella chart
+  instantiates this once per service (web, ledger, portfolio, …) via aliases.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

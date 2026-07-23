@@ -1,0 +1,23 @@
+# Keep the build context small & reproducible.
+node_modules
+.next
+out
+build
+npm-debug.log*
+.git
+.gitignore
+Dockerfile
+Dockerfile.dev
+.dockerignore
+
+# Never ship local secrets into an image layer.
+.env
+.env.local
+.env.*.local
+
+# Editor / OS cruft
+.DS_Store
+*.pem
+coverage
+.vercel
+*.tsbuildinfo

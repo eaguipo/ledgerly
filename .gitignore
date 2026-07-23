@@ -13,6 +13,14 @@ build/
 # Supabase CLI (if used later)
 .supabase/
 
+# Infra: local Helm overrides (may hold Supabase creds) + vendored subcharts
+deploy/helm/**/values.local.yaml
+deploy/helm/**/charts/*.tgz
+deploy/helm/**/Chart.lock
+
+# Kubeconfig dumps
+kubeconfig*.yaml
+
 # Logs & OS cruft
 *.log
 .DS_Store

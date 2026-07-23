@@ -1,0 +1,44 @@
+# k3d cluster definition for local Ledgerly development.
+#   Create with:  k3d cluster create --config deploy/k3d/cluster.yaml
+#
+# What this gives you:
+#   * a 1-server + 1-agent k3s cluster running in Docker
+#   * a local image registry at k3d-registry.localhost:5000 (host + in-cluster)
+#   * host :8080 -> ingress :80 and :8443 -> :443 via the k3d load balancer
+#   * Traefik disabled — we install ingress-nginx ourselves (see Makefile)
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: ledgerly
+servers: 1
+agents: 1
+
+# A registry the host can push to and the cluster can pull from under the SAME
+# name (k3d-registry.localhost:5000). Add `127.0.0.1 k3d-registry.localhost`
+# to /etc/hosts so the name resolves on your Mac too (`make hosts`).
+registries:
+  create:
+    name: registry.localhost
+    host: "0.0.0.0"
+    hostPort: "5000"
+
+# Publish the ingress controller through the k3d load balancer on high ports
+# (no sudo needed for ports >1024).
+ports:
+  - port: 8080:80
+    nodeFilters:
+      - loadbalancer
+  - port: 8443:443
+    nodeFilters:
+      - loadbalancer
+
+options:
+  k3s:
+    extraArgs:
+      # Drop the bundled Traefik; ingress-nginx is installed separately.
+      - arg: --disable=traefik
+        nodeFilters:
+          - server:*
+  kubeconfig:
+    updateDefaultKubeconfig: true
+    switchCurrentContext: true

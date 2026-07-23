@@ -1,0 +1,18 @@
+apiVersion: v2
+name: ledgerly
+description: >-
+  Ledgerly personal-finance platform — umbrella chart that wires together the
+  microservice mesh. Each service is an instance of the reusable `service`
+  subchart, aliased and configured under its own key in values.yaml.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+
+# Add one aliased dependency per service as the mesh grows (ledger, portfolio,
+# debt, goal, reporting, currency, notification, api-gateway …). Values keyed by
+# the alias are passed to that instance.
+dependencies:
+  - name: service
+    alias: web
+    version: "0.1.0"
+    repository: "file://../charts/service"

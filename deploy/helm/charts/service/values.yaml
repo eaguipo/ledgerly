@@ -1,0 +1,64 @@
+# Defaults for ONE generic HTTP microservice. Override per-instance in the
+# umbrella chart's values under the service's alias key (e.g. `web:`).
+
+# Name of the workload/resources. When used as an aliased subchart this defaults
+# to the alias (e.g. "web"); set fullnameOverride to be explicit.
+nameOverride: ""
+fullnameOverride: ""
+
+replicaCount: 1
+
+image:
+  repository: k3d-registry.localhost:5000/ledgerly-web
+  tag: dev
+  pullPolicy: IfNotPresent
+
+# Port the app listens on inside the container.
+containerPort: 3000
+
+service:
+  type: ClusterIP
+  port: 80            # port the ClusterIP Service exposes
+  targetPort: 3000    # container port it forwards to
+
+ingress:
+  enabled: false
+  className: nginx
+  host: ""            # e.g. ledgerly.local
+  path: /
+  pathType: Prefix
+  annotations: {}
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 80
+
+# Non-secret environment (rendered into a ConfigMap and mounted via envFrom).
+env: {}
+
+# Secret environment (rendered into a Secret via envFrom). For a local learning
+# cluster these are templated for convenience; in real deployments inject them
+# with --set / an external secret manager, never commit real values.
+secretEnv: {}
+
+# HTTP probe target. Point at a dedicated /healthz once services expose one.
+probes:
+  path: /
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+podAnnotations: {}
+podSecurityContext: {}
+securityContext: {}

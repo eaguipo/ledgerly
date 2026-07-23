@@ -1,0 +1,47 @@
+# Umbrella values. Each top-level key matches a dependency alias in Chart.yaml
+# and is passed to that `service` subchart instance.
+#
+# Secrets & per-developer Supabase creds do NOT belong here. Supply them via:
+#   * Tilt  — reads apps/web/.env.local automatically (the dev default), or
+#   * Helm  — `-f values.local.yaml` (copy values.local.yaml.example first).
+
+web:
+  fullnameOverride: web
+  replicaCount: 1
+
+  image:
+    repository: k3d-registry.localhost:5000/ledgerly-web
+    tag: dev
+    pullPolicy: IfNotPresent
+
+  containerPort: 3000
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: 3000
+
+  ingress:
+    enabled: true
+    className: nginx
+    host: ledgerly.local
+    path: /
+    pathType: Prefix
+
+  # The Next.js app can be slow to warm on first boot; be patient before probing.
+  probes:
+    path: /
+    initialDelaySeconds: 8
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 6
+
+  # Non-secret runtime env. Real Supabase values are injected by Tilt or
+  # values.local.yaml — these placeholders are intentionally invalid.
+  env:
+    NODE_ENV: production
+    NEXT_PUBLIC_SUPABASE_URL: ""
+    NEXT_PUBLIC_SUPABASE_ANON_KEY: ""
+
+  # Server-only secret env. Injected by Tilt or values.local.yaml.
+  secretEnv:
+    SUPABASE_SERVICE_ROLE_KEY: ""

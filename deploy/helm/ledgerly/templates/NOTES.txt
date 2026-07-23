@@ -1,0 +1,20 @@
+Ledgerly is deploying 🎉
+
+Release:   {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+
+Services in this release:
+{{- if .Values.web }}
+  • web  → http://{{ .Values.web.ingress.host }}:8080  (Next.js frontend / BFF)
+{{- end }}
+
+Next steps:
+  1. Make sure these host entries exist (run `make hosts` once):
+       127.0.0.1  ledgerly.local
+       127.0.0.1  k3d-registry.localhost
+  2. Watch rollout:   kubectl -n {{ .Release.Namespace }} get pods -w
+  3. Open the app:    http://{{ .Values.web.ingress.host }}:8080
+
+If a page 500s on Supabase calls, double-check your NEXT_PUBLIC_SUPABASE_URL /
+ANON_KEY were provided (via Tilt from apps/web/.env.local, or values.local.yaml)
+AND that the web image was BUILT with those NEXT_PUBLIC_* build args.
