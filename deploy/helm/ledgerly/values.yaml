@@ -41,7 +41,80 @@ web:
     NODE_ENV: production
     NEXT_PUBLIC_SUPABASE_URL: ""
     NEXT_PUBLIC_SUPABASE_ANON_KEY: ""
+    # Expense reads/writes now go through the gateway (in-cluster DNS).
+    GATEWAY_URL: "http://api-gateway"
 
   # Server-only secret env. Injected by Tilt or values.local.yaml.
   secretEnv:
     SUPABASE_SERVICE_ROLE_KEY: ""
+
+# ── api-gateway: validates the Supabase JWT, routes to services ──────────────
+api-gateway:
+  fullnameOverride: api-gateway
+  replicaCount: 1
+  image:
+    repository: k3d-registry.localhost:5000/ledgerly-api-gateway
+    tag: dev
+    pullPolicy: IfNotPresent
+  containerPort: 8080
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: 8080
+  ingress:
+    enabled: false
+  probes:
+    path: /healthz
+    initialDelaySeconds: 4
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 6
+  env:
+    NODE_ENV: production
+    SUPABASE_URL: ""
+    SUPABASE_ANON_KEY: ""
+    LEDGER_URL: "http://ledger"
+  secretEnv:
+    # Optional: set to enable fast local HS256 verification instead of the
+    # Supabase Auth introspection fallback. Leave empty to use introspection.
+    SUPABASE_JWT_SECRET: ""
+    # Shared secret the gateway sends to downstream services (see ledger).
+    INTERNAL_API_SECRET: ""
+  networkPolicy:
+    enabled: true
+    ingressFromPods:
+      - { app.kubernetes.io/name: web }
+
+# ── ledger: owns income/expense ledger data (schema: public for now) ─────────
+ledger:
+  fullnameOverride: ledger
+  replicaCount: 1
+  image:
+    repository: k3d-registry.localhost:5000/ledgerly-ledger
+    tag: dev
+    pullPolicy: IfNotPresent
+  containerPort: 8080
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: 8080
+  ingress:
+    enabled: false
+  probes:
+    path: /healthz
+    initialDelaySeconds: 4
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 6
+  env:
+    NODE_ENV: production
+    SUPABASE_URL: ""
+  secretEnv:
+    SUPABASE_SERVICE_ROLE_KEY: ""
+    # Must match the gateway's INTERNAL_API_SECRET. Requests without a matching
+    # x-internal-secret header are rejected (defense-in-depth over x-user-id).
+    INTERNAL_API_SECRET: ""
+  networkPolicy:
+    enabled: true
+    ingressFromPods:
+      - { app.kubernetes.io/name: api-gateway }

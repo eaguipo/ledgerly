@@ -62,3 +62,11 @@ probes:
 podAnnotations: {}
 podSecurityContext: {}
 securityContext: {}
+
+# Restrict who may call this service. When enabled, only pods matching
+# ingressFromPods (same namespace) — and, if allowIngressController, the
+# ingress-nginx namespace — may reach the container port. Egress stays open.
+networkPolicy:
+  enabled: false
+  ingressFromPods: []       # e.g. [{ app.kubernetes.io/name: api-gateway }]
+  allowIngressController: false

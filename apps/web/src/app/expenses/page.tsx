@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
+import { gatewayFetch } from "@/lib/gateway";
 import { formatMoney } from "@/lib/format";
 import { ExpenseForm } from "./expense-form";
 
@@ -8,6 +9,16 @@ interface Currency {
   code: string;
   symbol: string | null;
   minor_unit: number;
+}
+
+interface Portfolio {
+  id: string;
+  name: string;
+}
+
+interface Category {
+  id: string;
+  name: string;
 }
 
 interface ExpenseRow {
@@ -40,29 +51,28 @@ export default async function ExpensesPage() {
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  const [{ data: portfolios }, { data: categories }, { data: expenses }] =
-    await Promise.all([
-      supabase
-        .from("portfolios")
-        .select("id, name")
-        .eq("is_archived", false)
-        .order("sort_order")
-        .order("created_at"),
-      supabase
-        .from("expense_categories")
-        .select("id, name")
-        .eq("is_active", true)
-        .order("name"),
-      supabase
-        .from("expenses")
-        .select(
-          "id, merchant, category:expense_categories(name), transaction:transactions!inner(id, amount, txn_date, description, currency:currencies(code, symbol, minor_unit), portfolio:portfolios(name))",
-        )
-        .order("created_at", { ascending: false })
-        .limit(30),
-    ]);
+  // Reads go through the api-gateway → ledger-service (no direct DB access).
+  const [optionsRes, listRes] = await Promise.all([
+    gatewayFetch("/ledger/expenses/options"),
+    gatewayFetch("/ledger/expenses?limit=30"),
+  ]);
 
-  const rows = (expenses ?? []) as unknown as ExpenseRow[];
+  const options = optionsRes.ok
+    ? ((await optionsRes.json()) as {
+        portfolios?: Portfolio[];
+        categories?: Category[];
+      })
+    : {};
+  const portfolios: Portfolio[] = options.portfolios ?? [];
+  const categories: Category[] = options.categories ?? [];
+
+  const list = listRes.ok
+    ? ((await listRes.json()) as { expenses?: ExpenseRow[] })
+    : {};
+  const rows = (list.expenses ?? []) as ExpenseRow[];
+
+  // Distinguish "service unreachable" from a genuinely empty account.
+  const serviceError = !optionsRes.ok || !listRes.ok;
 
   return (
     <main className="mx-auto w-full max-w-3xl flex-1 px-4 py-10">
@@ -77,6 +87,16 @@ export default async function ExpensesPage() {
           ← Dashboard
         </Link>
       </div>
+
+      {serviceError && (
+        <div
+          role="alert"
+          className="mb-6 rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300"
+        >
+          Couldn’t reach the expense service. Some data may be missing — please
+          try again shortly.
+        </div>
+      )}
 
       {/* Add expense */}
       <section className="mb-8 rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">

@@ -139,10 +139,54 @@ Helm **library chart** — a good future exercise.
   provided; check `apps/web/.env.local` (Tilt) or `values.local.yaml` (Helm).
 - **colima slow/OOM** → `colima stop && colima start --cpu 4 --memory 8`.
 
+## Phase B — expenses through the gateway
+
+Phase B extracts the **first real service seam**. The web app no longer touches
+expense tables directly; it calls the mesh:
+
+```
+Browser → web (Next.js BFF, holds Supabase session)
+            │  Authorization: Bearer <supabase access_token>
+            ▼
+        api-gateway   ── validates the JWT (introspection, or local HS256 if
+            │             SUPABASE_JWT_SECRET is set), injects x-user-id,
+            │             does NOT forward the client Authorization
+            ▼
+        ledger-service ── service-role client (bypasses RLS) → scopes every
+            │             query by x-user-id; writes via create_expense RPC
+            ▼
+        Supabase Postgres (public schema; triggers keep balances/guards)
+```
+
+**Why the data stays in `public` (not a `ledger` schema yet):** portfolio
+balances are maintained by **triggers on `transactions`** (plus overdraft +
+currency guards), so the ledger and portfolio domains are coupled *in the
+database*. We extract the **API seam** first (web → gateway → ledger); moving to
+a true per-service schema is a later step once that balance logic is lifted into
+the app/event layer. Extract the service boundary before the data boundary.
+
+**Services** (both `ClusterIP`-only, reached via in-cluster DNS):
+- `services/api-gateway` — Fastify; `GET /healthz`, proxies `/ledger/*` → `http://ledger`.
+- `services/ledger` — Fastify; `GET /healthz`, `GET /expenses`, `GET /expenses/options`,
+  `POST /expenses` (→ `create_expense` RPC).
+
+**Required DB migration:** run once in the Supabase SQL Editor after schema/policies:
+
+```
+db/functions/create_expense.sql   -- atomic transaction+expense insert, service_role only
+```
+
+> Trust model note: services trust the gateway's `x-user-id`. On a local cluster
+> that's fine; in production you'd add a **NetworkPolicy** so only the gateway can
+> reach the services (planned for Phase E). The gateway never forwards a
+> client-supplied `x-user-id`.
+
 ## Roadmap
 
 - **A — Foundation** ✅ monorepo, Dockerized web, k3d + ingress, Helm umbrella, Tilt.
-- **B — Gateway + first service** — api-gateway (JWT validation) + ledger-service.
-- **C — Fan out** — portfolio / debt / goal / currency services + shared libs.
+- **B — Gateway + first service** ✅ api-gateway (JWT validation) + ledger-service;
+  web calls the gateway for expenses; `create_expense` RPC.
+- **C — Fan out** — portfolio / debt / goal / currency services + shared libs +
+  NetworkPolicies.
 - **D — Async** — NATS event bus, reporting + notification workers.
 - **E — Ops** — probes/HPA, Prometheus + Grafana + Loki, GitHub Actions CI.

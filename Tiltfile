@@ -27,6 +27,9 @@ creds = load_dotenv('apps/web/.env.local')
 supa_url = creds.get('NEXT_PUBLIC_SUPABASE_URL', '')
 supa_anon = creds.get('NEXT_PUBLIC_SUPABASE_ANON_KEY', '')
 supa_service = creds.get('SUPABASE_SERVICE_ROLE_KEY', '')
+supa_jwt = creds.get('SUPABASE_JWT_SECRET', '')  # optional; enables local HS256 verify
+# Shared secret the gateway presents to downstream services (dev-only value).
+internal_secret = creds.get('INTERNAL_API_SECRET', 'dev-internal-ledgerly-secret')
 if not supa_url or not supa_anon:
     warn('NEXT_PUBLIC_SUPABASE_URL / ANON_KEY missing from apps/web/.env.local')
 
@@ -55,6 +58,28 @@ docker_build(
     ],
 )
 
+# Backend microservices (dev images, tsx watch + live sync).
+docker_build(
+    'ledgerly-api-gateway',
+    context='services/api-gateway',
+    dockerfile='services/api-gateway/Dockerfile.dev',
+    live_update=[
+        sync('services/api-gateway/src', '/app/src'),
+        run('cd /app && npm install',
+            trigger=['services/api-gateway/package.json']),
+    ],
+)
+docker_build(
+    'ledgerly-ledger',
+    context='services/ledger',
+    dockerfile='services/ledger/Dockerfile.dev',
+    live_update=[
+        sync('services/ledger/src', '/app/src'),
+        run('cd /app && npm install',
+            trigger=['services/ledger/package.json']),
+    ],
+)
+
 # ── deploy the umbrella chart ────────────────────────────────────────────────
 k8s_yaml(helm(
     'deploy/helm/ledgerly',
@@ -62,14 +87,30 @@ k8s_yaml(helm(
     namespace='ledgerly',
     values=['deploy/helm/ledgerly/values.yaml'],
     set=[
+        # web
         'web.image.repository=ledgerly-web',
         'web.image.tag=dev',
         'web.env.NEXT_PUBLIC_SUPABASE_URL=' + supa_url,
         'web.env.NEXT_PUBLIC_SUPABASE_ANON_KEY=' + supa_anon,
         'web.secretEnv.SUPABASE_SERVICE_ROLE_KEY=' + supa_service,
+        # api-gateway
+        'api-gateway.image.repository=ledgerly-api-gateway',
+        'api-gateway.image.tag=dev',
+        'api-gateway.env.SUPABASE_URL=' + supa_url,
+        'api-gateway.env.SUPABASE_ANON_KEY=' + supa_anon,
+        'api-gateway.secretEnv.SUPABASE_JWT_SECRET=' + supa_jwt,
+        'api-gateway.secretEnv.INTERNAL_API_SECRET=' + internal_secret,
+        # ledger
+        'ledger.image.repository=ledgerly-ledger',
+        'ledger.image.tag=dev',
+        'ledger.env.SUPABASE_URL=' + supa_url,
+        'ledger.secretEnv.SUPABASE_SERVICE_ROLE_KEY=' + supa_service,
+        'ledger.secretEnv.INTERNAL_API_SECRET=' + internal_secret,
     ],
 ))
 
 k8s_resource('web', port_forwards=['3000:3000'], labels=['frontend'])
+k8s_resource('api-gateway', port_forwards=['8080:8080'], labels=['backend'])
+k8s_resource('ledger', port_forwards=['8081:8080'], labels=['backend'])
 
 print('Ledgerly: open http://ledgerly.local:8080 (ingress) or http://localhost:3000 (port-forward)')

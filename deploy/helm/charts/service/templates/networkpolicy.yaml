@@ -1,0 +1,36 @@
+{{- if .Values.networkPolicy.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "service.fullname" . }}
+  labels:
+    {{- include "service.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "service.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    {{- range .Values.networkPolicy.ingressFromPods }}
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+      ports:
+        - port: {{ $.Values.containerPort }}
+    {{- end }}
+    {{- if .Values.networkPolicy.allowIngressController }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - port: {{ .Values.containerPort }}
+    {{- end }}
+  egress:
+    # Allow all egress: services reach external Supabase, cluster DNS, and each
+    # other. The security control here is on INGRESS (who may call this service).
+    - {}
+{{- end }}

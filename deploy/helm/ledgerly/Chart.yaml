@@ -16,3 +16,11 @@ dependencies:
     alias: web
     version: "0.1.0"
     repository: "file://../charts/service"
+  - name: service
+    alias: api-gateway
+    version: "0.1.0"
+    repository: "file://../charts/service"
+  - name: service
+    alias: ledger
+    version: "0.1.0"
+    repository: "file://../charts/service"

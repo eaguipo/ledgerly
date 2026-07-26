@@ -5,15 +5,22 @@ Namespace: {{ .Release.Namespace }}
 
 Services in this release:
 {{- if .Values.web }}
-  • web  → http://{{ .Values.web.ingress.host }}:8080  (Next.js frontend / BFF)
+  • web          → http://{{ .Values.web.ingress.host }}:8080  (Next.js frontend / BFF)
+{{- end }}
+{{- if index .Values "api-gateway" }}
+  • api-gateway  → ClusterIP (validates the Supabase JWT, routes to services)
+{{- end }}
+{{- if .Values.ledger }}
+  • ledger       → ClusterIP (income/expense ledger service)
 {{- end }}
 
 Next steps:
   1. Make sure these host entries exist (run `make hosts` once):
        127.0.0.1  ledgerly.local
        127.0.0.1  k3d-registry.localhost
-  2. Watch rollout:   kubectl -n {{ .Release.Namespace }} get pods -w
-  3. Open the app:    http://{{ .Values.web.ingress.host }}:8080
+  2. One-time DB migration (Supabase SQL Editor): run db/functions/create_expense.sql
+  3. Watch rollout:   kubectl -n {{ .Release.Namespace }} get pods -w
+  4. Open the app:    http://{{ .Values.web.ingress.host }}:8080
 
 If a page 500s on Supabase calls, double-check your NEXT_PUBLIC_SUPABASE_URL /
 ANON_KEY were provided (via Tilt from apps/web/.env.local, or values.local.yaml)
