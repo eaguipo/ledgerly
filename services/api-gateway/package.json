@@ -1,0 +1,23 @@
+{
+  "name": "@ledgerly/api-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "dev": "tsx watch src/server.ts"
+  },
+  "dependencies": {
+    "@fastify/rate-limit": "^10.2.0",
+    "fastify": "^5.2.0",
+    "jsonwebtoken": "^9.0.2"
+  },
+  "devDependencies": {
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/node": "^20",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.0"
+  }
+}
