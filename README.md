@@ -38,6 +38,8 @@ personal-finance-tracker/
 │   ├── policies.sql          ← Row Level Security policies + grants (run AFTER schema)
 │   └── seed.sql              ← default expense categories, purpose tags, currencies
 └── docs/
+    ├── DEVELOPER-GUIDE.md    ← build, run & test the system (start here)
+    ├── MAINTENANCE.md        ← architecture, change recipes, debugging playbooks
     ├── INFRA.md              ← Docker/Kubernetes local mesh — architecture + runbook
     ├── DATABASE.md           ← design decisions + requirement-coverage matrix
     ├── ROADMAP.md            ← phased build plan (MVP → full app) + first setup steps
