@@ -93,6 +93,15 @@ k8s_yaml(helm(
         'web.env.NEXT_PUBLIC_SUPABASE_URL=' + supa_url,
         'web.env.NEXT_PUBLIC_SUPABASE_ANON_KEY=' + supa_anon,
         'web.secretEnv.SUPABASE_SERVICE_ROLE_KEY=' + supa_service,
+        # `next dev` with Turbopack peaks well above the chart's 512Mi
+        # production limit while compiling, and gets OOMKilled without this.
+        # Probes must also tolerate on-demand route compilation.
+        'web.env.NODE_ENV=development',
+        'web.resources.requests.memory=512Mi',
+        'web.resources.limits.memory=2Gi',
+        'web.probes.initialDelaySeconds=30',
+        'web.probes.timeoutSeconds=10',
+        'web.probes.failureThreshold=12',
         # api-gateway
         'api-gateway.image.repository=ledgerly-api-gateway',
         'api-gateway.image.tag=dev',
@@ -110,7 +119,9 @@ k8s_yaml(helm(
 ))
 
 k8s_resource('web', port_forwards=['3000:3000'], labels=['frontend'])
-k8s_resource('api-gateway', port_forwards=['8080:8080'], labels=['backend'])
+# Not 8080 — the k3d loadbalancer publishes the ingress there, and a forward on
+# 127.0.0.1:8080 shadows it, making ledgerly.local:8080 hit the gateway instead.
+k8s_resource('api-gateway', port_forwards=['8082:8080'], labels=['backend'])
 k8s_resource('ledger', port_forwards=['8081:8080'], labels=['backend'])
 
 print('Ledgerly: open http://ledgerly.local:8080 (ingress) or http://localhost:3000 (port-forward)')
