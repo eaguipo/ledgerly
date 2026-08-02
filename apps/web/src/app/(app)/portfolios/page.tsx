@@ -7,9 +7,10 @@ import { requestLogger } from "@/lib/request-context";
 import { categoryLabel } from "./constants";
 import { PortfolioForm } from "./portfolio-form";
 import { createPortfolio, archivePortfolio, restorePortfolio } from "./actions";
+import { parseSort, sortColumn, sortHref, directionOf } from "./sorting";
 import { PageContainer, PageHeader } from "@/components/shell/page-header";
 import { Card, CardBody, CardHeader } from "@/components/ui/card";
-import { Table, Th, Tr, Td } from "@/components/ui/table";
+import { Table, Th, SortableTh, Tr, Td } from "@/components/ui/table";
 import { Badge, EmptyState } from "@/components/ui/feedback";
 import { Money } from "@/components/ui/money";
 
@@ -39,7 +40,13 @@ function currencyOf(p: PortfolioRow): CurrencyEmbed | undefined {
   return c ?? undefined;
 }
 
-export default async function PortfoliosPage() {
+export default async function PortfoliosPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ sort?: string | string[]; dir?: string | string[] }>;
+}) {
+  const sort = parseSort(await searchParams); // Next 16: search params are async.
+
   const log = await requestLogger({ page: "/portfolios" });
   const elapsed = startTimer();
 
@@ -54,30 +61,45 @@ export default async function PortfoliosPage() {
 
   const pageLog = log.child({ userId: user.id });
 
+  // A header sort replaces the manual `sort_order` ordering rather than
+  // refining it — leading with `sort_order` would win every comparison and the
+  // click would look like it did nothing. `created_at` stays as the tiebreaker
+  // either way so equal rows never shuffle between renders.
+  const orderBy = sort
+    ? [sortColumn(sort), { column: "created_at", ascending: true }]
+    : [
+        { column: "is_archived", ascending: true },
+        { column: "sort_order", ascending: true },
+        { column: "created_at", ascending: true },
+      ];
+
+  let portfoliosQuery = supabase
+    .from("portfolios")
+    .select(
+      "id, name, category, currency_id, current_balance, is_savings, is_liquid, is_archived, institution, currency:currencies(code, symbol, minor_unit)",
+    );
+
+  for (const { column, ascending } of orderBy) {
+    portfoliosQuery = portfoliosQuery.order(column, { ascending });
+  }
+
   const [
     { data: currencies, error: currenciesError },
     { data: profile, error: profileError },
     { data: portfolios, error: portfoliosError },
   ] = await Promise.all([
-      supabase
-        .from("currencies")
-        .select("id, code, symbol, name, minor_unit")
-        .eq("is_active", true)
-        .order("code"),
-      supabase
-        .from("profiles")
-        .select("default_currency_id")
-        .eq("id", user.id)
-        .single(),
-      supabase
-        .from("portfolios")
-        .select(
-          "id, name, category, currency_id, current_balance, is_savings, is_liquid, is_archived, institution, currency:currencies(code, symbol, minor_unit)",
-        )
-        .order("is_archived")
-        .order("sort_order")
-        .order("created_at"),
-    ]);
+    supabase
+      .from("currencies")
+      .select("id, code, symbol, name, minor_unit")
+      .eq("is_active", true)
+      .order("code"),
+    supabase
+      .from("profiles")
+      .select("default_currency_id")
+      .eq("id", user.id)
+      .single(),
+    portfoliosQuery,
+  ]);
 
   // An empty `currencies` list silently disables the whole add-account form
   // (no currency to pick), which reads as a UI bug rather than a data one.
@@ -100,6 +122,7 @@ export default async function PortfoliosPage() {
     archived: archived.length,
     currencyOptions: currencies?.length ?? 0,
     defaultCurrencyId: profile?.default_currency_id ?? null,
+    sort: sort ? `${sort.key}:${sort.dir}` : "default",
     durationMs: elapsed(),
   });
 
@@ -129,9 +152,25 @@ export default async function PortfoliosPage() {
                 label="Your accounts"
                 head={
                   <>
-                    <Th>Account</Th>
-                    <Th>Category</Th>
-                    <Th align="right">Balance</Th>
+                    <SortableTh
+                      href={sortHref("name", sort)}
+                      direction={directionOf("name", sort)}
+                    >
+                      Account
+                    </SortableTh>
+                    <SortableTh
+                      href={sortHref("category", sort)}
+                      direction={directionOf("category", sort)}
+                    >
+                      Category
+                    </SortableTh>
+                    <SortableTh
+                      align="right"
+                      href={sortHref("balance", sort)}
+                      direction={directionOf("balance", sort)}
+                    >
+                      Balance
+                    </SortableTh>
                     <Th align="right">
                       <span className="sr-only">Actions</span>
                     </Th>
@@ -202,9 +241,23 @@ export default async function PortfoliosPage() {
               <Table
                 label="Archived accounts"
                 head={
+                  // Both tables come from one query, so a sort reorders the
+                  // archived rows too. Making these headers live as well keeps
+                  // that visible instead of looking like a random reshuffle.
                   <>
-                    <Th>Account</Th>
-                    <Th align="right">Balance</Th>
+                    <SortableTh
+                      href={sortHref("name", sort)}
+                      direction={directionOf("name", sort)}
+                    >
+                      Account
+                    </SortableTh>
+                    <SortableTh
+                      align="right"
+                      href={sortHref("balance", sort)}
+                      direction={directionOf("balance", sort)}
+                    >
+                      Balance
+                    </SortableTh>
                     <Th align="right">
                       <span className="sr-only">Actions</span>
                     </Th>
