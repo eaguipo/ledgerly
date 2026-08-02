@@ -40,6 +40,19 @@ function one<T>(v: T | T[] | null | undefined): T | undefined {
   return (Array.isArray(v) ? v[0] : v) ?? undefined;
 }
 
+/**
+ * Snap a running total back onto the currency's minor unit.
+ *
+ * Postgres `numeric(38,18)` arrives as a string and becomes a float here, so
+ * subtracting a day's flows back out of the current balance leaves residue —
+ * an account opened inside the window lands on 2.9e-14 instead of 0. That
+ * residue is invisible in the formatted figure but catastrophic as a divisor.
+ */
+function roundToMinorUnit(value: number, minorUnit: number | null | undefined) {
+  const factor = 10 ** (minorUnit ?? 2);
+  return Math.round(value * factor) / factor;
+}
+
 function isoDaysAgo(days: number) {
   const d = new Date();
   d.setDate(d.getDate() - days);
@@ -90,11 +103,14 @@ function buildTrend(
     running -= netByDay.get(days[i]) ?? 0;
   }
 
-  return days.map((iso, i) => ({
-    label: shortDate(iso),
-    value: values[i],
-    display: formatMoney(values[i], currency),
-  }));
+  return days.map((iso, i) => {
+    const value = roundToMinorUnit(values[i], currency?.minor_unit);
+    return {
+      label: shortDate(iso),
+      value,
+      display: formatMoney(value, currency),
+    };
+  });
 }
 
 export default async function DashboardPage() {
@@ -193,8 +209,20 @@ export default async function DashboardPage() {
     primary.currency,
   );
   const opening = trend[0].value;
-  const delta = primary.total - opening;
-  const pct = opening !== 0 ? (delta / Math.abs(opening)) * 100 : null;
+  const delta = roundToMinorUnit(
+    primary.total - opening,
+    primary.currency.minor_unit,
+  );
+
+  // Only show a percentage when the starting balance is large enough for one to
+  // mean anything. If every account was opened inside the window the opening
+  // balance is zero, and "grew by ∞%" is noise, not information — the absolute
+  // delta already tells the whole story.
+  const oneMinorUnit = 1 / 10 ** (primary.currency.minor_unit ?? 2);
+  const pct =
+    Math.abs(opening) >= oneMinorUnit
+      ? (delta / Math.abs(opening)) * 100
+      : null;
 
   const allocation = [...primary.categories.entries()].map(([cat, value]) => ({
     label: categoryLabel(cat),
