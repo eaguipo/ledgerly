@@ -1,26 +1,110 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+/*
+ * Dark mode is CLASS-driven, not `prefers-color-scheme`, so the theme toggle
+ * can override the OS. The inline script in the root layout sets `.dark` on
+ * <html> before first paint. This custom variant replaces Tailwind v4's
+ * default media-query `dark:` variant.
+ */
+@custom-variant dark (&:where(.dark, .dark *));
 
+/*
+ * Design tokens.
+ *
+ * Every token is declared here as a plain CSS variable and exposed to Tailwind
+ * through `@theme inline`. `inline` matters: it makes the generated utilities
+ * reference `var(--surface)` directly instead of copying the value, so the
+ * `.dark` overrides below actually take effect. The payoff is that components
+ * write `bg-surface text-ink border-line` with NO `dark:` variants at all.
+ */
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-raised: var(--raised);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-soft: var(--accent-soft);
+
+  --color-positive: var(--positive);
+  --color-negative: var(--negative);
+  --color-negative-soft: var(--negative-soft);
+
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+/* Light — warm off-white, never pure white on the canvas. */
+:root {
+  --canvas: #f6f4ef;
+  --surface: #ffffff;
+  --raised: #f1eee7;
+  --line: #e4dfd4;
+  --line-strong: #d3ccbd;
+
+  --ink: #16201b;
+  --muted: #63706a;
+  --faint: #8b968f;
+
+  --accent: #1f6b4a;
+  --accent-hover: #185840;
+  --accent-ink: #f6f4ef;
+  --accent-soft: #e3efe7;
+
+  --positive: #1f6b4a;
+  --negative: #a94b39;
+  --negative-soft: #f6e6e1;
+
+  color-scheme: light;
+}
+
+/* Dark — warm near-black. The default look; the app is designed dark-first. */
+.dark {
+  --canvas: #0e1311;
+  --surface: #151b18;
+  --raised: #1c2420;
+  --line: #26302b;
+  --line-strong: #35413a;
+
+  --ink: #f2efe6;
+  --muted: #96a29c;
+  --faint: #6c7a73;
+
+  --accent: #7fbfa0;
+  --accent-hover: #96cfb2;
+  --accent-ink: #0e1311;
+  --accent-soft: #1b2f26;
+
+  --positive: #7fbfa0;
+  --negative: #d98a72;
+  --negative-soft: #2e201c;
+
+  color-scheme: dark;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background-color: var(--canvas);
+  color: var(--ink);
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+}
+
+/* One consistent focus ring everywhere, keyboard-only. */
+@layer base {
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+}
+
+/* Money and other figures should never jitter as digits change. */
+@utility figure {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
 }
