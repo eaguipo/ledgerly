@@ -61,11 +61,23 @@ inflow-vs-outflow summary.
 
 **Goal:** track what you owe / are owed, and savings goals.
 
-- **Debts:** payable vs receivable, principal, outstanding, due date, status.
-- **Debt payments:** call `do_debt_payment()` — moves real cash out of a portfolio *and* reduces the
-  outstanding balance (counting principal). Status flips to settled at zero.
+**Full plan (tasks, SQL, routes, edge cases): [`docs/PHASE-3-PLAN.md`](./PHASE-3-PLAN.md).** The
+tables, triggers, RLS policies and views already exist — this phase is service-role RPCs, ledger
+routes and UI, not schema work.
+
+- **Debts:** ✅ payable vs receivable, principal, outstanding, due date, status. Creating a debt takes
+  an *optional* funding account — set it and the disbursement posts a linked ledger row; leave it
+  blank for debts that predate the app.
+- **Debt payments:** ✅ **not** `do_debt_payment()` — that derives identity from `auth.uid()` and
+  cannot work from ledger-service, exactly like `do_transfer()` in Phase 2. Ships as a service-role
+  `create_debt_payment()` with the guards the original lacks (overpayment, settled, archived).
+  Amount takes an optional interest portion; outstanding drops by principal only.
 - **Goals:** target amount, contributions, progress bars; auto-completes when current ≥ target.
-- Apply RLS to every new table (don't forget — each new table needs it).
+  Contributions are an **earmark** — they never move real cash (that is what Transfers is for).
+- RLS: already applied to all four tables in `db/policies.sql` — verify, don't re-add. This phase
+  adds no new tables.
+- Debts are archived, never hard-deleted: the cascade to `debt_payments` would orphan ledger rows
+  that moved real money.
 
 **Deliverable:** debts tracked both directions with auto-decrementing balances; savings/emergency
 goals with auto-completing progress.

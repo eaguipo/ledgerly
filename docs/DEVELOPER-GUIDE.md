@@ -74,14 +74,22 @@ Supabase SQL Editor → New query → paste and run each file, one at a time:
 1. db/schema.sql              tables, enums, functions, triggers, reporting views
 2. db/policies.sql            Row Level Security policies + grants
 3. db/seed.sql                currencies, feature catalog, per-user default back-fills
-4. db/functions/create_expense.sql    the RPC ledger-service calls (Phase B)
+4. db/functions/*.sql         the RPCs ledger-service calls — every file, in any order:
+     create_expense.sql             expenses
+     create_income.sql              income (also widens income_source: gains, gift)
+     create_transfer.sql            transfers (service-role sibling of do_transfer)
+     create_debt.sql                debts + optional disbursement (widens income_source: loan_received)
+     create_debt_payment.sql        debt payments (service-role sibling of do_debt_payment)
+     debt_principal_recompute.sql   keeps outstanding_balance right when a principal is edited
 ```
 
-Order matters: `policies.sql` references objects created in `schema.sql`, and `seed.sql` must run
-before the first signup so `handle_new_user()` can resolve the default PHP currency.
+Order matters for 1–3: `policies.sql` references objects created in `schema.sql`, and `seed.sql`
+must run before the first signup so `handle_new_user()` can resolve the default PHP currency. The
+`db/functions/` files are independent of each other.
 
-Step 4 is easy to forget — without it, adding an expense fails with a PostgREST "function not
-found" error. There is no migration tool; running these files by hand *is* the migration process.
+Step 4 is easy to forget — without it the matching feature fails with a PostgREST "function not
+found" error (PGRST202/42883), which reads like a bug in the app rather than a missing migration.
+There is no migration tool; running these files by hand *is* the migration process.
 
 ### 1.4 Credentials file
 

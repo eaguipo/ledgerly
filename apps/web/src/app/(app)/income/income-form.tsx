@@ -2,7 +2,8 @@
 
 import { useActionState, useState } from "react";
 import { createIncome, type IncomeFormState } from "./actions";
-import { INCOME_SOURCES, sourceNamePlaceholder } from "./constants";
+import Link from "next/link";
+import { SELECTABLE_INCOME_SOURCES, sourceNamePlaceholder } from "./constants";
 import { Button } from "@/components/ui/button";
 import { Checkbox, Field, Input, Select } from "@/components/ui/field";
 import { Alert } from "@/components/ui/feedback";
@@ -101,7 +102,7 @@ function IncomeFields({
           onChange={(e) => setSource(e.target.value)}
         >
           <option value="">Select source…</option>
-          {INCOME_SOURCES.map((s) => (
+          {SELECTABLE_INCOME_SOURCES.map((s) => (
             <option key={s.value} value={s.value}>
               {s.label}
             </option>
@@ -114,9 +115,22 @@ function IncomeFields({
         htmlFor="source_name"
         optional
         hint={
-          source === "debt_payment_received"
-            ? "Recording it here adds the cash but does not reduce a tracked debt yet."
-            : undefined
+          // Deliberate split (Phase 3, decision D3): a repayment recorded here
+          // is cash in and nothing more. Only /debts decrements a tracked debt,
+          // so there is exactly one source of truth for what is still owed.
+          source === "debt_payment_received" ? (
+            <>
+              This adds the cash but doesn&apos;t reduce a tracked debt. If
+              you&apos;re tracking it,{" "}
+              <Link
+                href="/debts"
+                className="font-medium text-accent underline-offset-4 hover:underline"
+              >
+                record it on the debt instead
+              </Link>
+              .
+            </>
+          ) : undefined
         }
       >
         <Input

@@ -550,28 +550,68 @@ create trigger trg_txn_currency before insert or update on public.transactions
 -- 15c. Debt auto-reduction + status (Rule 14). Outstanding is reduced ONLY by
 -- principal portions, so paying interest never pays down principal. Self-healing
 -- recompute-from-sum.
-create or replace function public.recompute_debt_balance()
-returns trigger language plpgsql as $$
+--
+-- The arithmetic lives in recompute_debt(uuid) so that BOTH entry points can use
+-- it: a payment changing the sum paid, and the principal itself being corrected.
+-- Keep this block byte-identical to db/functions/debt_principal_recompute.sql,
+-- which applies the same definitions to an already-provisioned database — if the
+-- two drift, re-running this file silently reverts the fix.
+create or replace function public.recompute_debt(_debt_id uuid)
+returns void language plpgsql set search_path = public as $$
 declare
-  v_debt_id uuid := coalesce(new.debt_id, old.debt_id);
-  v_principal numeric(38,18); v_principal_paid numeric(38,18); v_outstanding numeric(38,18);
-  v_new_status public.debt_status;
+  v_principal      numeric(38,18);
+  v_principal_paid numeric(38,18);
+  v_outstanding    numeric(38,18);
+  v_new_status     public.debt_status;
 begin
-  select principal_amount into v_principal from public.debts where id = v_debt_id;
-  select coalesce(sum(principal_portion),0) into v_principal_paid
-    from public.debt_payments where debt_id = v_debt_id;
+  select principal_amount into v_principal from public.debts where id = _debt_id;
+  if v_principal is null then return; end if;
+
+  select coalesce(sum(principal_portion), 0) into v_principal_paid
+    from public.debt_payments where debt_id = _debt_id;
+
   v_outstanding := greatest(v_principal - v_principal_paid, 0);
   if v_outstanding = 0 then v_new_status := 'settled';
   elsif v_outstanding < v_principal then v_new_status := 'partially_paid';
   else v_new_status := 'open'; end if;
+
   update public.debts
     set outstanding_balance = v_outstanding,
+        -- written_off is sticky: a recovery reduces the balance without
+        -- pretending the debt was collected normally.
         status = case when status = 'written_off' then 'written_off' else v_new_status end
-    where id = v_debt_id;
+    where id = _debt_id;
+end $$;
+revoke all on function public.recompute_debt(uuid) from public;
+grant execute on function public.recompute_debt(uuid) to service_role;
+
+-- Payment-side trigger: the row here carries debt_id.
+create or replace function public.recompute_debt_balance()
+returns trigger language plpgsql set search_path = public as $$
+begin
+  perform public.recompute_debt(coalesce(new.debt_id, old.debt_id));
   return coalesce(new, old);
 end $$;
 create trigger trg_debt_payment_recompute after insert or update or delete on public.debt_payments
   for each row execute function public.recompute_debt_balance();
+
+-- Principal-side trigger: correcting principal_amount has to recompute too, or a
+-- debt of 10,000 paid down 3,000 and then corrected to 8,000 keeps reporting
+-- 7,000 outstanding until the next payment happens to fire the other trigger.
+-- The row here has `id`, not `debt_id`, hence a second entry point.
+create or replace function public.recompute_debt_on_debts()
+returns trigger language plpgsql set search_path = public as $$
+begin
+  perform public.recompute_debt(new.id);
+  return new;
+end $$;
+-- `of principal_amount` plus the WHEN clause keep this from re-firing on
+-- recompute_debt()'s own UPDATE, which only touches outstanding_balance/status.
+create trigger trg_debt_principal_recompute
+  after update of principal_amount on public.debts
+  for each row
+  when (old.principal_amount is distinct from new.principal_amount)
+  execute function public.recompute_debt_on_debts();
 
 -- 15d. Goal auto-status (Rule 18). Achieve on completion; stamp first_achieved_at
 -- once and never clear it. Demotion preserves first_achieved_at for history.
@@ -839,13 +879,29 @@ create or replace view public.v_liquid_by_currency
   from public.portfolios p join public.currencies c on c.id = p.currency_id
   where p.is_liquid and not p.is_archived group by p.user_id, c.code;
 
+-- Debt ORIGINATION is excluded for the same reason transfer_in/transfer_out are
+-- absent from the kind list: it changes the form of your net worth, not what you
+-- earned or spent. Borrowing swaps a liability for cash; lending swaps cash for a
+-- receivable. Counting either would report a 10,000 loan as 10,000 of income and
+-- a 500 loan-out as 500 of spending — the same double-count the transfer
+-- exclusion was added to prevent. Debt *payments* stay counted: servicing a debt
+-- is real cash leaving, and Rule 14 makes that ledger row the single source of
+-- truth for it.
 create or replace view public.v_cashflow
   with (security_invoker = true) as
   select t.user_id, c.code as currency_code, t.txn_date, t.direction, sum(t.amount) as total
   from public.transactions t join public.currencies c on c.id = t.currency_id
   where t.is_void = false and t.kind in ('income','expense','debt_payment_made','debt_payment_received')
+    and not exists (select 1 from public.incomes i
+                     where i.transaction_id = t.id and i.source = 'loan_received')
+    and not exists (select 1 from public.expenses e
+                     where e.transaction_id = t.id and e.debt_id is not null)
   group by t.user_id, c.code, t.txn_date, t.direction;
 
+-- Same exclusion: money lent out is not a spending category. `debt_id is null`
+-- is safe as the marker because Rule 14 / DECISIONS-NEEDED #3 make the debt
+-- payment its own ledger kind — a debt-linked EXPENSE only ever comes from
+-- create_debt()'s lending leg.
 create or replace view public.v_expense_by_category
   with (security_invoker = true) as
   select e.user_id, ec.id as category_id, ec.name as category_name, t.txn_date,
@@ -854,6 +910,7 @@ create or replace view public.v_expense_by_category
   join public.transactions t on t.id = e.transaction_id and t.is_void = false
   join public.expense_categories ec on ec.id = e.category_id
   join public.currencies c on c.id = t.currency_id
+  where e.debt_id is null
   group by e.user_id, ec.id, ec.name, t.txn_date, c.code;
 
 create or replace view public.v_debt_outstanding

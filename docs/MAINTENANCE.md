@@ -81,8 +81,17 @@ personal-finance-tracker/
 └── db/functions/                  atomic money RPCs, run separately after schema/policies
     ├── create_expense.sql
     ├── create_income.sql          also widens the income_source enum (gains, gift)
-    └── create_transfer.sql        service-role sibling of do_transfer()
+    ├── create_transfer.sql        service-role sibling of do_transfer()
+    ├── create_debt.sql            debt + optional disbursement; widens income_source (loan_received)
+    ├── create_debt_payment.sql    service-role sibling of do_debt_payment(), plus overpayment guards
+    ├── debt_principal_recompute.sql  recompute_debt() helper + the debts-side trigger
+    └── cashflow_excludes_debt_origination.sql  keeps borrowing/lending out of inflow-outflow
 ```
+
+Everything under `db/functions/` is mirrored into `db/schema.sql`, so a fresh install gets the same
+result from `schema.sql` → `policies.sql` → `seed.sql` alone. The files exist to apply the same
+definitions to an already-provisioned database. **When you change one, change both** — otherwise
+re-running `schema.sql` silently reverts the fix.
 
 ---
 
@@ -160,8 +169,8 @@ transactions            ← single source of truth for EVERY money movement
 
   ├── incomes            1:1 detail
   ├── expenses           1:1 detail — category_id NOT NULL (Rule 9)
-  ├── transfers          written only by do_transfer()
-  └── debt_payments      written only by do_debt_payment()
+  ├── transfers          written only by do_transfer() / create_transfer()
+  └── debt_payments      written only by do_debt_payment() / create_debt_payment()
 ```
 
 Key mechanics:
@@ -173,15 +182,26 @@ Key mechanics:
   would push a non-`allow_negative` portfolio below zero, whatever wrote it.
   `txn_enforce_currency()` requires the transaction currency to match the portfolio's.
 - **Money RPCs are the write path for anything multi-row**: `create_expense()`, `create_income()`,
-  `create_transfer()`, `do_transfer()`, `do_debt_payment()`. Each runs in one transaction and locks
-  what it needs. Clients cannot write `transfers` directly.
+  `create_transfer()`, `create_debt()`, `create_debt_payment()`, `do_transfer()`,
+  `do_debt_payment()`. Each runs in one transaction and locks what it needs. Clients cannot write
+  `transfers` or `debt_payments` directly.
 - **Two RPC dialects, and picking the wrong one fails confusingly.** The older `do_*` functions read
   identity from `auth.uid()` and are granted to `authenticated` — the RLS path. The newer `create_*`
   functions take `_user_id` explicitly and are granted to `service_role` — the path ledger-service
   uses. Calling a `do_*` function as service_role makes `auth.uid()` NULL, so every ownership lookup
   misses and you get "not found or not owned by you" for a row that plainly exists. `create_transfer`
-  exists precisely because `do_transfer` cannot be called from the service. Keep the two in sync
-  until `do_transfer` is retired.
+  and `create_debt_payment` exist precisely because `do_transfer` / `do_debt_payment` cannot be
+  called from the service. Keep each pair in sync until the `do_*` half is retired.
+- **`create_debt_payment` is not a pure port.** It adds guards `do_debt_payment` never had: an
+  overpayment is rejected rather than silently absorbed by `greatest(principal − paid, 0)`, and a
+  settled or archived debt refuses payment. A *written-off* debt still accepts one — recovering on a
+  write-off is real, and `recompute_debt()` keeps the status sticky so it is not relabelled as
+  collected.
+- **Debt outstanding is derived, never incremented.** `recompute_debt(uuid)` rebuilds
+  `outstanding_balance` and `status` from the sum of principal portions, and runs from two triggers:
+  on `debt_payments` (any change) and on `debts` (when `principal_amount` itself is edited). Only
+  the principal portion pays a debt down, so an interest-only payment moves cash and leaves the
+  balance alone.
 - **All 7 reporting views are `security_invoker = true`** so RLS on the base tables applies. A plain
   `CREATE VIEW` runs as the owner and would leak every tenant's finances — this was the critical bug
   caught in the schema review. If you add a view, you must add this option.
@@ -651,8 +671,11 @@ Health probes are excluded from the services' request logging (`quietLogControll
 | 500 from ledger with a PostgREST message | ledger logs | Schema drift: renamed column, missing FK, ambiguous embed (§7) |
 | 400 "Account not found or archived" | `create_expense` / `create_income` / `create_transfer` | Portfolio belongs to another user, doesn't exist, or is archived |
 | 400 "Could not find the function public.create_…" (PGRST202/42883) | `db/functions/` | The RPC file was never run in the SQL Editor, or PostgREST's schema cache is stale — re-run the file (it ends with `notify pgrst, 'reload schema'`) |
-| 400 "invalid input value for enum income_source" | `create_income.sql` STEP 1 | The `alter type … add value` half was skipped, so `gains`/`gift` don't exist in the DB yet |
+| 400 "invalid input value for enum income_source" | `create_income.sql` / `create_debt.sql` STEP 1 | The `alter type … add value` half was skipped, so `gains`/`gift`/`loan_received` don't exist in the DB yet |
 | Transfer says "not found or not owned by you" for an account you can see | which RPC is being called | `do_transfer()` was called as service_role — `auth.uid()` is NULL there. Use `create_transfer()` (§5.6) |
+| Debt says "Debt not found or not owned by you" for one that plainly exists | which RPC is being called | Same trap as above: `do_debt_payment()` called as service_role. Use `create_debt_payment()` |
+| Debt outstanding looks stale after editing the principal | `debt_principal_recompute.sql` | The file was never run, so the `debts`-side trigger doesn't exist and only a payment recomputes |
+| "Principal of X is more than the Y still outstanding" | `create_debt_payment` overpayment guard | Working as intended — use the form's "pay the remaining" shortcut rather than typing a larger figure |
 | 400 "Insufficient funds…" | `txn_overdraft_guard` | Real overdraft, or a drifted `current_balance` cache |
 | "Transaction currency must match portfolio currency" | `txn_enforce_currency` | Code derived the currency from the wrong place — always take it from the portfolio |
 | Balances wrong after edits | `apply_txn_to_balance` | A void/update path that didn't go through the trigger; run `select reconcile_portfolio_balances();` |
