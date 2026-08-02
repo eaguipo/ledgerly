@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import Link from "next/link";
 import { cn } from "@/lib/cn";
 
 /**
@@ -35,6 +36,11 @@ export function Table({
   );
 }
 
+type SortDirection = "asc" | "desc";
+
+const TH_BASE =
+  "border-b border-line px-5 py-2.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-muted";
+
 export function Th({
   children,
   align = "left",
@@ -45,12 +51,68 @@ export function Th({
   return (
     <th
       scope="col"
-      className={cn(
-        "border-b border-line px-5 py-2.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-muted",
-        align === "right" ? "text-right" : "text-left",
-      )}
+      className={cn(TH_BASE, align === "right" ? "text-right" : "text-left")}
     >
       {children}
+    </th>
+  );
+}
+
+/**
+ * A column header that links to a sorted view of the same table. Purely
+ * presentational — the caller owns where `href` points and which column is
+ * active, so this works for both URL-driven and in-memory sorting.
+ *
+ * `aria-sort` is what announces the state to screen readers; the arrow is
+ * decorative and hidden from them.
+ */
+export function SortableTh({
+  children,
+  align = "left",
+  href,
+  direction,
+}: {
+  children?: ReactNode;
+  align?: "left" | "right";
+  href: string;
+  /** `null` when this column is not the one currently sorted. */
+  direction?: SortDirection | null;
+}) {
+  return (
+    <th
+      scope="col"
+      aria-sort={
+        direction ? (direction === "asc" ? "ascending" : "descending") : "none"
+      }
+      className={cn(TH_BASE, align === "right" ? "text-right" : "text-left")}
+    >
+      <Link
+        href={href}
+        // Sorting rewrites the rows in place; jumping the viewport to the top
+        // of the table would lose the row the user was looking at.
+        scroll={false}
+        className={cn(
+          "group inline-flex items-center gap-1 rounded-sm uppercase tracking-[0.1em] transition-colors hover:text-ink",
+          "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent",
+          direction && "text-ink",
+          // On a right-aligned column the arrow goes before the label, so the
+          // label itself stays flush with the right edge the numbers align to.
+          align === "right" && "flex-row-reverse",
+        )}
+      >
+        {children}
+        <span
+          aria-hidden="true"
+          className={cn(
+            "text-[10px] leading-none",
+            direction
+              ? "opacity-100"
+              : "opacity-0 transition-opacity group-hover:opacity-50",
+          )}
+        >
+          {direction === "asc" ? "↑" : direction === "desc" ? "↓" : "↕"}
+        </span>
+      </Link>
     </th>
   );
 }
