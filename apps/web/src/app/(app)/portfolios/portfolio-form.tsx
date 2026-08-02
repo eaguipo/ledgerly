@@ -30,22 +30,46 @@ type Action = (
 
 const initialState: PortfolioFormState = { status: "idle" };
 
-export function PortfolioForm({
-  action,
-  currencies,
-  mode,
-  portfolio,
-  defaultCurrencyId,
-  submitLabel,
-}: {
+interface FormProps {
   action: Action;
   currencies: Currency[];
   mode: "create" | "edit";
   portfolio?: PortfolioInput;
   defaultCurrencyId?: string;
   submitLabel: string;
+}
+
+export function PortfolioForm(props: FormProps) {
+  const [state, formAction, pending] = useActionState(props.action, initialState);
+
+  // Clearing the form is a remount keyed on the new account's id. Only
+  // createPortfolio returns a success state — updatePortfolio redirects to the
+  // list instead — so in edit mode this key never changes.
+  return (
+    <PortfolioFields
+      key={state.status === "success" ? state.portfolioId : "entry"}
+      {...props}
+      state={state}
+      formAction={formAction}
+      pending={pending}
+    />
+  );
+}
+
+function PortfolioFields({
+  currencies,
+  mode,
+  portfolio,
+  defaultCurrencyId,
+  submitLabel,
+  state,
+  formAction,
+  pending,
+}: Omit<FormProps, "action"> & {
+  state: PortfolioFormState;
+  formAction: (formData: FormData) => void;
+  pending: boolean;
 }) {
-  const [state, formAction, pending] = useActionState(action, initialState);
   const currentCurrency = currencies.find(
     (c) => c.id === portfolio?.currency_id,
   );
@@ -140,9 +164,14 @@ export function PortfolioForm({
         label="Savings account (counts toward liquid money)"
       />
 
-      {/* Mounted always, filled conditionally — see Alert's note on live regions. */}
+      {/* Both mounted always, filled conditionally — see Alert's note on live
+          regions. The success line is the only confirmation the create form
+          gives, since it no longer navigates on save. */}
       <Alert tone="error">
         {state.status === "error" ? state.message : null}
+      </Alert>
+      <Alert tone="success">
+        {state.status === "success" ? "Account added." : null}
       </Alert>
 
       <Button type="submit" disabled={pending} className="w-full">

@@ -12,13 +12,25 @@ import { CATEGORY_VALUES } from "./constants";
  * client, so RLS enforces ownership (user_id = auth.uid()) and the 'portfolios'
  * feature gate. We still re-fetch the user via getUser() (network-verified).
  *
- * Logging note: `redirect()` throws NEXT_REDIRECT to unwind, so the success line
- * is written BEFORE it. If you see `portfolio.create.ok` but the browser sits on
- * "Saving…", the write succeeded and the problem is the navigation, not the DB.
+ * `createPortfolio` returns a success state instead of redirecting. It used to
+ * end with `redirect("/portfolios")` — a redirect to the route the form is
+ * already on — which meant the only thing that could clear the button's
+ * "Saving…" state was a navigation completing. Any stall there (a slow dev
+ * compile, an interrupted transition) left the button stuck with no recourse
+ * but a reload, and the user got no success confirmation either way. Returning
+ * state settles `useActionState` directly and matches createExpense /
+ * createIncome / createTransfer.
+ *
+ * `updatePortfolio` still redirects, and should: it runs on /portfolios/[id]
+ * and sends you back to the list, which is a real navigation to a different
+ * route rather than a no-op refresh.
  */
 
 export type PortfolioFormState =
   | { status: "idle" }
+  // `portfolioId` doubles as the form's reset key: a new value per success
+  // remounts the fields, which is how the create form clears itself.
+  | { status: "success"; portfolioId: string }
   | { status: "error"; message: string };
 
 interface ParsedForm {
@@ -180,8 +192,12 @@ export async function createPortfolio(
     durationMs: elapsed(),
   });
 
+  // revalidatePath alone re-renders the list in place — no navigation needed,
+  // since the form lives on /portfolios already. An opening balance also moves
+  // net worth, so the dashboard is stale too.
   revalidatePath("/portfolios");
-  redirect("/portfolios");
+  if (f.openingBalance > 0) revalidatePath("/dashboard");
+  return { status: "success", portfolioId: portfolio.id };
 }
 
 export async function updatePortfolio(
