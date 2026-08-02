@@ -103,12 +103,15 @@ export function ExpenseForm({
         />
       </Field>
 
-      {state.status === "error" ? (
-        <Alert tone="error">{state.message}</Alert>
-      ) : null}
-      {state.status === "success" ? (
-        <Alert tone="success">Expense added.</Alert>
-      ) : null}
+      {/* Both mounted always, filled conditionally — a live region created at
+          the same moment it gains text is usually not announced, and the
+          success message is the only confirmation the form gives. */}
+      <Alert tone="error">
+        {state.status === "error" ? state.message : null}
+      </Alert>
+      <Alert tone="success">
+        {state.status === "success" ? "Expense added." : null}
+      </Alert>
 
       <Button type="submit" disabled={pending} className="w-full">
         {pending ? "Saving…" : "Add expense"}

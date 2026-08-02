@@ -4,6 +4,8 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { headers } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
+import { maskEmail, startTimer } from "@/lib/logger";
+import { requestLogger } from "@/lib/request-context";
 
 /**
  * Shared auth Server Actions for Phase 1.
@@ -27,6 +29,14 @@ import { createClient } from "@/lib/supabase/server";
  *    success); its error is deliberately generic, so we branch on error.code
  *    ('invalid_credentials','email_not_confirmed').
  *  - signOut defaults to GLOBAL scope; we pass { scope: 'local' }.
+ *
+ * Logging rules for this file, which handles credentials:
+ *  - passwords are NEVER logged, not even their length;
+ *  - emails are masked (a***e@example.com) — enough to follow one person's
+ *    attempts through the log, not enough to harvest addresses;
+ *  - Supabase `error.code` IS logged. The message shown to the user is
+ *    deliberately vague for anti-enumeration reasons, so the code is the only
+ *    way to tell "wrong password" from "unconfirmed email" from "Auth is down".
  */
 
 export type AuthState =
@@ -52,16 +62,40 @@ export async function login(
   _prevState: AuthState,
   formData: FormData,
 ): Promise<AuthState> {
+  const log = await requestLogger({ action: "login" });
+  const elapsed = startTimer();
   const { email, password } = readCredentials(formData);
 
   if (!email || !password) {
+    log.warn("auth.login.invalid", {
+      reason: !email ? "missing email" : "missing password",
+    });
     return { status: "error", message: "Email and password are required." };
   }
 
+  log.debug("auth.login.start", { email: maskEmail(email) });
+
   const supabase = await createClient();
-  const { error } = await supabase.auth.signInWithPassword({ email, password });
+  const { data, error } = await supabase.auth.signInWithPassword({
+    email,
+    password,
+  });
 
   if (error) {
+    // A known code is a normal, expected rejection; an unknown one usually
+    // means Supabase Auth itself is unhappy (rate limit, outage, misconfig).
+    const known =
+      error.code === "email_not_confirmed" || error.code === "invalid_credentials";
+    const fields = {
+      email: maskEmail(email),
+      code: error.code,
+      status: error.status,
+      message: error.message,
+      durationMs: elapsed(),
+    };
+    if (known) log.warn("auth.login.rejected", fields);
+    else log.error("auth.login.failed", fields);
+
     // Branch on error.code (not message) — message is deliberately generic.
     if (error.code === "email_not_confirmed") {
       return {
@@ -76,6 +110,12 @@ export async function login(
     }
     return { status: "error", message: error.message };
   }
+
+  log.info("auth.login.ok", {
+    userId: data.user?.id,
+    email: maskEmail(email),
+    durationMs: elapsed(),
+  });
 
   // Success: data.user/data.session are guaranteed non-null. The @supabase/ssr
   // client already wrote the auth cookies. Revalidate then redirect (outside any
@@ -95,12 +135,21 @@ export async function signup(
   _prevState: AuthState,
   formData: FormData,
 ): Promise<AuthState> {
+  const log = await requestLogger({ action: "signup" });
+  const elapsed = startTimer();
   const { email, password } = readCredentials(formData);
 
   if (!email || !password) {
+    log.warn("auth.signup.invalid", {
+      reason: !email ? "missing email" : "missing password",
+    });
     return { status: "error", message: "Email and password are required." };
   }
   if (password.length < 6) {
+    log.warn("auth.signup.invalid", {
+      email: maskEmail(email),
+      reason: "password shorter than 6 characters",
+    });
     return {
       status: "error",
       message: "Password must be at least 6 characters.",
@@ -110,6 +159,15 @@ export async function signup(
   const supabase = await createClient();
   const headersList = await headers();
   const origin = headersList.get("origin") ?? "http://localhost:3000";
+
+  // The confirmation email links back to `origin` — if that is wrong (proxy not
+  // forwarding Origin, wrong ingress host) every confirmation link 404s, and
+  // this line is where you find out.
+  log.debug("auth.signup.start", {
+    email: maskEmail(email),
+    emailRedirectTo: `${origin}/auth/callback`,
+  });
+
   const { data, error } = await supabase.auth.signUp({
     email,
     password,
@@ -117,6 +175,21 @@ export async function signup(
   });
 
   if (error) {
+    const known =
+      error.code === "user_already_exists" ||
+      error.code === "email_exists" ||
+      error.code === "weak_password" ||
+      error.code === "over_email_send_rate_limit";
+    const fields = {
+      email: maskEmail(email),
+      code: error.code,
+      status: error.status,
+      message: error.message,
+      durationMs: elapsed(),
+    };
+    if (known) log.warn("auth.signup.rejected", fields);
+    else log.error("auth.signup.failed", fields);
+
     if (error.code === "user_already_exists" || error.code === "email_exists") {
       // Neutral message — avoid leaking account existence.
       return {
@@ -140,10 +213,21 @@ export async function signup(
   // Email-confirmation gate: with "Confirm email" enabled, session is null even
   // though signUp succeeded. Do NOT redirect — show the confirm state instead.
   if (!data.session) {
+    log.info("auth.signup.confirm_email_sent", {
+      userId: data.user?.id,
+      email: maskEmail(email),
+      durationMs: elapsed(),
+    });
     return { status: "confirm_email", email };
   }
 
   // "Confirm email" is disabled: a session exists, user is logged in.
+  log.info("auth.signup.ok", {
+    userId: data.user?.id,
+    email: maskEmail(email),
+    autoSignedIn: true,
+    durationMs: elapsed(),
+  });
   revalidatePath("/", "layout");
   redirect("/dashboard");
 }
@@ -154,8 +238,33 @@ export async function signup(
  * Used as a plain <form action={signout}> action, so it takes no args.
  */
 export async function signout(): Promise<void> {
+  const log = await requestLogger({ action: "signout" });
+  const elapsed = startTimer();
   const supabase = await createClient();
-  await supabase.auth.signOut({ scope: "local" });
+
+  // Read the id from the cookie (no network call) before it is torn down.
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+
+  const { error } = await supabase.auth.signOut({ scope: "local" });
+  if (error) {
+    // The cookies are cleared regardless, so the user still lands signed out —
+    // but a recurring error here means the Auth server is rejecting revocations.
+    log.error("auth.signout.failed", {
+      userId: session?.user?.id ?? null,
+      code: error.code,
+      status: error.status,
+      message: error.message,
+      durationMs: elapsed(),
+    });
+  } else {
+    log.info("auth.signout.ok", {
+      userId: session?.user?.id ?? null,
+      durationMs: elapsed(),
+    });
+  }
+
   revalidatePath("/", "layout");
   redirect("/login");
 }

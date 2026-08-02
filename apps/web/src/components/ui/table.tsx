@@ -8,12 +8,23 @@ import { cn } from "@/lib/cn";
 export function Table({
   head,
   children,
+  label,
 }: {
   head: ReactNode;
   children: ReactNode;
+  /** Names the scrollable region for screen readers. */
+  label?: string;
 }) {
   return (
-    <div className="overflow-x-auto">
+    // tabIndex={0} makes the scroll container reachable by keyboard: on a
+    // narrow viewport the columns that overflow are otherwise unreachable
+    // without a pointer. role+label stop it being an unlabelled tab stop.
+    <div
+      className="overflow-x-auto"
+      tabIndex={0}
+      role="region"
+      aria-label={label ?? "Table, scrolls horizontally"}
+    >
       <table className="w-full min-w-[34rem] border-collapse text-sm">
         <thead>
           <tr>{head}</tr>

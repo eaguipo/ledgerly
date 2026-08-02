@@ -82,10 +82,15 @@ export function TrendChart({ points }: { points: TrendPoint[] }) {
         onFocus={() => setActive((p) => p ?? points.length - 1)}
         onBlur={() => setActive(null)}
         tabIndex={0}
-        role="img"
-        aria-label={`Net worth trend. ${points[0]?.label}: ${points[0]?.display}. ${
+        // Deliberately NOT role="img": that makes the subtree
+        // children-presentational, which would strip the crosshair readout
+        // below out of the accessibility tree and leave the arrow-key
+        // navigation announcing nothing. A focusable group keeps the live
+        // region readable.
+        role="group"
+        aria-label={`Net worth trend, ${points.length} daily points from ${points[0]?.label} to ${
           points[points.length - 1]?.label
-        }: ${points[points.length - 1]?.display}.`}
+        }. Use the left and right arrow keys to read each day.`}
       >
         <svg
           viewBox={`0 0 ${VB_W} ${VB_H}`}
@@ -146,6 +151,13 @@ export function TrendChart({ points }: { points: TrendPoint[] }) {
         <span>{points[0]?.label}</span>
         <span>{points[points.length - 1]?.label}</span>
       </div>
+
+      {/* Always mounted so the region is registered before it ever has text —
+          a live region created at the same moment it gains content is usually
+          not announced. This is what makes arrow-key navigation audible. */}
+      <p aria-live="polite" className="sr-only">
+        {cur ? `${cur.label}: ${cur.display}` : ""}
+      </p>
     </div>
   );
 }

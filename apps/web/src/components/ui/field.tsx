@@ -6,8 +6,11 @@ import { cn } from "@/lib/cn";
  * "fixed value" panel can never drift apart visually.
  */
 export const controlClass =
-  "w-full rounded-xl border border-line bg-raised px-3 py-2.5 text-sm text-ink " +
-  "placeholder:text-faint transition-colors hover:border-line-strong " +
+  "w-full rounded-xl border border-field-border bg-raised px-3 py-2.5 text-sm text-ink " +
+  // `hover:border-muted` and not an alpha modifier: `border-ink/40` would
+  // compile to a full-strength ink border, because alpha is lost on var-backed
+  // theme tokens (see globals.css).
+  "placeholder:text-faint transition-colors hover:border-muted " +
   "focus:border-accent focus:bg-surface";
 
 export function Field({
@@ -57,7 +60,7 @@ export function Checkbox({
       <input
         type="checkbox"
         {...props}
-        className="h-4 w-4 rounded border-line-strong accent-accent"
+        className="h-4 w-4 rounded border-field-border accent-accent"
       />
       {label}
     </label>

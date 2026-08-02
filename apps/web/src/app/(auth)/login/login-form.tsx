@@ -39,9 +39,10 @@ export function LoginForm() {
         />
       </Field>
 
-      {state.status === "error" ? (
-        <Alert tone="error">{state.message}</Alert>
-      ) : null}
+      {/* Mounted always, filled conditionally — see Alert's note on live regions. */}
+      <Alert tone="error">
+        {state.status === "error" ? state.message : null}
+      </Alert>
 
       <Button type="submit" disabled={pending} className="w-full">
         {pending ? "Signing in…" : "Sign in"}

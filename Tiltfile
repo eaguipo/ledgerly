@@ -97,6 +97,9 @@ k8s_yaml(helm(
         # production limit while compiling, and gets OOMKilled without this.
         # Probes must also tolerate on-demand route compilation.
         'web.env.NODE_ENV=development',
+        # Dev loop: log everything. NODE_ENV=development also switches the web
+        # app's logger to its human-readable format; the services stay JSON.
+        'web.env.LOG_LEVEL=debug',
         'web.resources.requests.memory=512Mi',
         'web.resources.limits.memory=2Gi',
         'web.probes.initialDelaySeconds=30',
@@ -109,10 +112,12 @@ k8s_yaml(helm(
         'api-gateway.env.SUPABASE_ANON_KEY=' + supa_anon,
         'api-gateway.secretEnv.SUPABASE_JWT_SECRET=' + supa_jwt,
         'api-gateway.secretEnv.INTERNAL_API_SECRET=' + internal_secret,
+        'api-gateway.env.LOG_LEVEL=debug',
         # ledger
         'ledger.image.repository=ledgerly-ledger',
         'ledger.image.tag=dev',
         'ledger.env.SUPABASE_URL=' + supa_url,
+        'ledger.env.LOG_LEVEL=debug',
         'ledger.secretEnv.SUPABASE_SERVICE_ROLE_KEY=' + supa_service,
         'ledger.secretEnv.INTERNAL_API_SECRET=' + internal_secret,
     ],

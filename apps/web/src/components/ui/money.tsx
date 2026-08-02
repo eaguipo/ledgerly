@@ -12,6 +12,11 @@ interface Currency {
  * as negative (muted terracotta), inflows as positive (accent green). Neutral
  * amounts — balances, transfers — stay ink-coloured, because colouring every
  * number turns the page into a traffic light.
+ *
+ * When an explicit `sign` is given the magnitude is formatted, so passing an
+ * already-negative amount with sign="negative" cannot produce "−₱-84.20".
+ * With sign="none" the amount's own sign is preserved, so a negative balance
+ * still reads as negative.
  */
 export function Money({
   amount,
@@ -24,7 +29,12 @@ export function Money({
   sign?: "none" | "negative" | "positive";
   className?: string;
 }) {
+  const n = Number(amount ?? 0);
+  const safe = Number.isFinite(n) ? n : 0;
+
   const prefix = sign === "negative" ? "−" : sign === "positive" ? "+" : "";
+  const value = sign === "none" ? safe : Math.abs(safe);
+
   return (
     <span
       className={cn(
@@ -35,7 +45,7 @@ export function Money({
       )}
     >
       {prefix}
-      {formatMoney(amount, currency)}
+      {formatMoney(value, currency)}
     </span>
   );
 }

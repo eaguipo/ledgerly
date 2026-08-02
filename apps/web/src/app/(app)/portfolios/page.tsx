@@ -2,6 +2,8 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import type { Metadata } from "next";
 import { createClient } from "@/lib/supabase/server";
+import { dbError, startTimer } from "@/lib/logger";
+import { requestLogger } from "@/lib/request-context";
 import { categoryLabel } from "./constants";
 import { PortfolioForm } from "./portfolio-form";
 import { createPortfolio, archivePortfolio, restorePortfolio } from "./actions";
@@ -38,14 +40,25 @@ function currencyOf(p: PortfolioRow): CurrencyEmbed | undefined {
 }
 
 export default async function PortfoliosPage() {
+  const log = await requestLogger({ page: "/portfolios" });
+  const elapsed = startTimer();
+
   const supabase = await createClient();
   const {
     data: { user },
   } = await supabase.auth.getUser();
-  if (!user) redirect("/login");
+  if (!user) {
+    log.warn("portfolios.load.unauthenticated");
+    redirect("/login");
+  }
 
-  const [{ data: currencies }, { data: profile }, { data: portfolios }] =
-    await Promise.all([
+  const pageLog = log.child({ userId: user.id });
+
+  const [
+    { data: currencies, error: currenciesError },
+    { data: profile, error: profileError },
+    { data: portfolios, error: portfoliosError },
+  ] = await Promise.all([
       supabase
         .from("currencies")
         .select("id, code, symbol, name, minor_unit")
@@ -66,9 +79,29 @@ export default async function PortfoliosPage() {
         .order("created_at"),
     ]);
 
+  // An empty `currencies` list silently disables the whole add-account form
+  // (no currency to pick), which reads as a UI bug rather than a data one.
+  if (currenciesError) {
+    pageLog.error("portfolios.currencies.load_failed", dbError(currenciesError));
+  }
+  if (profileError) {
+    pageLog.warn("portfolios.profile.load_failed", dbError(profileError));
+  }
+  if (portfoliosError) {
+    pageLog.error("portfolios.list.load_failed", dbError(portfoliosError));
+  }
+
   const rows = (portfolios ?? []) as PortfolioRow[];
   const active = rows.filter((p) => !p.is_archived);
   const archived = rows.filter((p) => p.is_archived);
+
+  pageLog.info("portfolios.load.ok", {
+    active: active.length,
+    archived: archived.length,
+    currencyOptions: currencies?.length ?? 0,
+    defaultCurrencyId: profile?.default_currency_id ?? null,
+    durationMs: elapsed(),
+  });
 
   return (
     <PageContainer>
@@ -93,6 +126,7 @@ export default async function PortfoliosPage() {
               </CardBody>
             ) : (
               <Table
+                label="Your accounts"
                 head={
                   <>
                     <Th>Account</Th>
@@ -166,6 +200,7 @@ export default async function PortfoliosPage() {
                 description={`${archived.length} hidden from balances and totals`}
               />
               <Table
+                label="Archived accounts"
                 head={
                   <>
                     <Th>Account</Th>

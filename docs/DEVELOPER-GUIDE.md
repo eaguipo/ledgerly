@@ -324,6 +324,34 @@ kubectl -n ledgerly rollout status deploy/web deploy/api-gateway deploy/ledger
 
 `/healthz` is deliberately exempt from the internal-secret check, so it's always reachable.
 
+Each process logs a config summary at boot — `web.boot`, `gateway.boot`, `ledger.boot`. Read those
+first: they report which credentials are **present** (never their values), the resolved log level,
+and for the gateway which auth mode it picked. A misconfigured service starts and passes `/healthz`
+regardless, so the boot line is usually faster than guessing.
+
+### Rung 2a — reading the logs
+
+All three processes emit one JSON object per line with the same fields (`level` as a string, ISO
+`time`, `service`, `msg`, `reqId`). Messages are named `<domain>.<action>.<outcome>`.
+
+```bash
+# Follow one user action across all three hops (see MAINTENANCE.md §6.1a).
+ID=<reqId from any log line, or the x-request-id response header>
+kubectl -n ledgerly logs deploy/web         | jq -c --arg i "$ID" 'select(.reqId==$i)'
+kubectl -n ledgerly logs deploy/api-gateway | jq -c --arg i "$ID" 'select(.reqId==$i)'
+kubectl -n ledgerly logs deploy/ledger      | jq -c --arg i "$ID" 'select(.reqId==$i)'
+
+# Anything that went wrong, anywhere.
+kubectl -n ledgerly logs deploy/ledger | jq -c 'select(.level=="error" or .level=="warn")'
+
+# Money that actually moved.
+kubectl -n ledgerly logs deploy/ledger | jq -c 'select(.msg=="ledger.expense.create_ok")'
+```
+
+`LOG_LEVEL` (`trace|debug|info|warn|error|fatal`) is read by all three; Tilt sets `debug`, the chart
+defaults to `info`. `debug` adds start-of-operation lines and per-query `dbMs` timings. In Mode A the
+web app prints a human-readable line instead of JSON (`LOG_FORMAT=json` overrides that).
+
 ### Rung 3 — the smoke test (do this for any change that touches money)
 
 Run through the app in a browser. This is the closest thing to an end-to-end test:
@@ -418,6 +446,10 @@ kubectl -n ledgerly describe pod -l app.kubernetes.io/name=web
 kubectl -n ledgerly get cm web-env -o yaml            # non-secret env actually deployed
 kubectl -n ledgerly exec -it deploy/ledger -- sh      # shell inside a service
 helm -n ledgerly list
+
+# Logs (JSON lines — see §4 Rung 2a)
+kubectl -n ledgerly logs deploy/ledger | jq -c 'select(.level=="error")'
+kubectl -n ledgerly logs deploy/web    | jq -c --arg i "$ID" 'select(.reqId==$i)'
 ```
 
 `make` with no target prints the full annotated target list.

@@ -22,6 +22,15 @@ export function Badge({
   );
 }
 
+/**
+ * Renders the live region unconditionally and only fills it when there is
+ * something to say. A `role="status"` element that is mounted at the same
+ * moment it gains text is frequently not announced — the region has to exist
+ * before the content arrives for assistive tech to notice the change.
+ *
+ * Callers therefore pass `children` as null/false to clear an alert rather
+ * than unmounting the component.
+ */
 export function Alert({
   tone,
   children,
@@ -29,14 +38,16 @@ export function Alert({
   tone: "error" | "success";
   children: ReactNode;
 }) {
+  const hasContent = Boolean(children);
   return (
     <p
       role={tone === "error" ? "alert" : "status"}
       className={cn(
-        "rounded-xl px-3 py-2.5 text-[13px]",
-        tone === "error"
-          ? "bg-negative-soft text-negative"
-          : "bg-accent-soft text-accent",
+        hasContent && "rounded-xl px-3 py-2.5 text-[13px]",
+        hasContent &&
+          (tone === "error"
+            ? "bg-negative-soft text-negative"
+            : "bg-accent-soft text-accent"),
       )}
     >
       {children}

@@ -52,7 +52,12 @@ export function ThemeToggle() {
       aria-label={theme ? label : "Toggle theme"}
       className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-muted transition-colors hover:bg-raised hover:text-ink"
     >
-      {theme === "light" ? (
+      {theme === null ? (
+        // The server cannot know the stored preference. Rendering either icon
+        // would paint the wrong one for half of all users and then visibly
+        // swap on hydration, so hold a same-size blank until the theme is known.
+        <span className="h-[18px] w-[18px]" aria-hidden />
+      ) : theme === "light" ? (
         <svg
           width={18}
           height={18}
