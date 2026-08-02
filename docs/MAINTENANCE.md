@@ -259,6 +259,8 @@ Treat this as the review checklist for every change.
 | `INTERNAL_API_SECRET` | gateway + ledger | chart `secretEnv` for both | Must match. If empty on the ledger, it logs a warning and enforces nothing |
 | `LEDGER_URL` | gateway | chart `env` (`http://ledger`) | In-cluster DNS name |
 | `PORT` | all services | image `ENV` / chart | Services default to 8080, web to 3000 |
+| `LOG_LEVEL` | web + gateway + ledger | chart `env` for all three (`info`); Tilt sets `debug` | `trace\|debug\|info\|warn\|error\|fatal`. Defaults to `info` in production, `debug` otherwise |
+| `LOG_FORMAT` | web only | `.env.local` | `pretty\|json`. Defaults to `pretty` in development, `json` in production. The services are always JSON |
 
 Where Tilt gets them: `Tiltfile:29-33` reads `apps/web/.env.local` and passes them as Helm `--set`
 overrides. `INTERNAL_API_SECRET` falls back to `dev-internal-ledgerly-secret` if absent.
@@ -585,6 +587,42 @@ kubectl -n ledgerly describe pod -l app.kubernetes.io/name=ledger   # events, pr
 Both services log every request with Fastify's logger, so a request that appears in the gateway log
 but not the ledger log means the hop between them failed — secret mismatch, NetworkPolicy, or DNS.
 
+### 6.1a Follow one request across all three logs
+
+All three processes emit JSON lines with the same field names — `level` (a string), `time` (ISO),
+`service`, `msg`, and `reqId`. `proxy.ts` stamps every inbound request with an `x-request-id`,
+`gatewayFetch` forwards it, and both Fastify services are configured with
+`requestIdHeader: "x-request-id"`, so **the same `reqId` appears in all three streams for one user
+action**. That is the fastest way to answer "where did this go wrong":
+
+```bash
+# Find the id — every response also carries it in the x-request-id header.
+kubectl -n ledgerly logs deploy/web | jq -c 'select(.msg=="expense.create.ok")'
+
+# Then follow that one action through all three hops.
+ID=<reqId>
+for d in web api-gateway ledger; do
+  echo "── $d"; kubectl -n ledgerly logs deploy/$d | jq -c --arg id "$ID" 'select(.reqId==$id)'
+done
+
+# Or just sweep for trouble.
+kubectl -n ledgerly logs deploy/ledger | jq -c 'select(.level=="error" or .level=="warn")'
+```
+
+Message names are `<domain>.<action>.<outcome>` (`expense.create.ok`, `gateway.auth.rejected`,
+`ledger.expense.create_rejected`), so grepping a whole flow is a substring match. Turn the volume up
+with `LOG_LEVEL=debug` (Tilt already does); `debug` adds the start-of-operation lines and the
+per-query `dbMs` timings, `info` and above is outcomes only.
+
+What is deliberately **not** logged: access tokens (only a `tokenFingerprint`), passwords, cookies,
+the internal secret, and free-text user data (merchant/description/account names appear as
+`hasMerchant: true` / `nameLength: 12`). Emails are masked to `a***e@example.com`. Amounts, account
+ids and user ids **are** logged — they are what makes a money bug traceable.
+
+Health probes are excluded from the services' request logging (`quietLogController` in
+`logging.ts`), so `/healthz` does not bury real traffic. Probe failures still show in
+`kubectl describe pod`.
+
 ### 6.2 Symptom → cause table
 
 | Symptom | Where to look first | Common cause |
@@ -592,7 +630,7 @@ but not the ledger log means the hop between them failed — secret mismatch, Ne
 | 401 "missing bearer token" | `gateway.ts` in web | No Supabase session — the Server Component didn't have cookies, or the user is logged out |
 | 401 "invalid or expired token" | gateway env | `SUPABASE_JWT_SECRET` set but wrong (a set secret disables the introspection fallback), or a genuinely expired token |
 | 403 "forbidden" from ledger | both `secretEnv` blocks | `INTERNAL_API_SECRET` mismatch between gateway and ledger |
-| 502 "upstream unavailable" | gateway logs (`upstream proxy failed`) | Ledger pod down, wrong `LEDGER_URL`, NetworkPolicy blocking, or a >10s upstream (`UPSTREAM_TIMEOUT_MS`) |
+| 502 "upstream unavailable" | gateway logs (`gateway.proxy.failed` — check its `timedOut` field) | Ledger pod down, wrong `LEDGER_URL`, NetworkPolicy blocking, or a >10s upstream (`UPSTREAM_TIMEOUT_MS`) |
 | 500 from ledger with a PostgREST message | ledger logs | Schema drift: renamed column, missing FK, ambiguous embed (§7) |
 | 400 "Account not found or archived" | `create_expense` | Portfolio belongs to another user, doesn't exist, or is archived |
 | 400 "Insufficient funds…" | `txn_overdraft_guard` | Real overdraft, or a drifted `current_balance` cache |
@@ -607,6 +645,9 @@ but not the ledger log means the hop between them failed — secret mismatch, Ne
 | `CrashLoopBackOff` on web, `OOMKilled` / exit 137 | `kubectl describe pod` → Last State | `next dev` needs far more than the chart's 512Mi default while compiling; the pod boots, serves once, then dies mid-compile |
 | Helm edit had no effect | — | Forgot `make helm-deps` after a subchart change |
 | Everything worked yesterday | `colima status` | VM stopped; `make cluster-up` restarts it |
+| Expense form missing on /expenses | ledger `ledger.expenses.options_empty` | The user has no active accounts and/or no active expense categories — seed data never ran |
+| "Something went wrong" page, no obvious cause | web `web.request.error` | Match the digest shown on screen against the `digest` field; `routeType` says whether it was a render, an action or a route handler |
+| Pod restarted and nothing explains it | pod logs, previous container | `process.uncaught_exception` / `process.unhandled_rejection` are logged as `fatal` before exit; a clean roll logs `process.shutdown.ok` |
 
 ### 6.3 Reproducing without the UI
 

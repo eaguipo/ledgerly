@@ -43,6 +43,9 @@ web:
     NEXT_PUBLIC_SUPABASE_ANON_KEY: ""
     # Expense reads/writes now go through the gateway (in-cluster DNS).
     GATEWAY_URL: "http://api-gateway"
+    # trace|debug|info|warn|error|fatal. Every service reads the same variable.
+    # Raise to debug when chasing a bug: `make dev` already does for all three.
+    LOG_LEVEL: info
 
   # Server-only secret env. Injected by Tilt or values.local.yaml.
   secretEnv:
@@ -74,6 +77,7 @@ api-gateway:
     SUPABASE_URL: ""
     SUPABASE_ANON_KEY: ""
     LEDGER_URL: "http://ledger"
+    LOG_LEVEL: info
   secretEnv:
     # Optional: set to enable fast local HS256 verification instead of the
     # Supabase Auth introspection fallback. Leave empty to use introspection.
@@ -109,6 +113,7 @@ ledger:
   env:
     NODE_ENV: production
     SUPABASE_URL: ""
+    LOG_LEVEL: info
   secretEnv:
     SUPABASE_SERVICE_ROLE_KEY: ""
     # Must match the gateway's INTERNAL_API_SECRET. Requests without a matching

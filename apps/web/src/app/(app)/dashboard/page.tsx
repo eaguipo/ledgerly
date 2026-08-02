@@ -1,6 +1,8 @@
 import { redirect } from "next/navigation";
 import type { Metadata } from "next";
 import { createClient } from "@/lib/supabase/server";
+import { dbError, startTimer } from "@/lib/logger";
+import { requestLogger } from "@/lib/request-context";
 import { formatMoney } from "@/lib/format";
 import { categoryLabel } from "../portfolios/constants";
 import { PageContainer, PageHeader } from "@/components/shell/page-header";
@@ -14,6 +16,8 @@ import { TrendChart, type TrendPoint } from "@/components/charts/trend-chart";
 export const metadata: Metadata = { title: "Dashboard" };
 
 const TREND_DAYS = 30;
+/** Ceiling for the trend query; see `trendComplete` below. */
+const TREND_ROW_LIMIT = 5000;
 
 interface CurrencyInfo {
   id?: string;
@@ -114,13 +118,24 @@ function buildTrend(
 }
 
 export default async function DashboardPage() {
+  const log = await requestLogger({ page: "/dashboard" });
+  const elapsed = startTimer();
+
   const supabase = await createClient();
   const {
     data: { user },
   } = await supabase.auth.getUser();
-  if (!user) redirect("/login");
+  if (!user) {
+    log.warn("dashboard.load.unauthenticated");
+    redirect("/login");
+  }
 
-  const [{ data: profile }, { data: portfolios }] = await Promise.all([
+  const pageLog = log.child({ userId: user.id });
+
+  const [
+    { data: profile, error: profileError },
+    { data: portfolios, error: portfoliosError },
+  ] = await Promise.all([
     supabase
       .from("profiles")
       .select("default_currency_id")
@@ -134,20 +149,60 @@ export default async function DashboardPage() {
       .eq("is_archived", false),
   ]);
 
+  // These queries discard their errors into an empty render. Logging them is the
+  // difference between "the dashboard says I have no accounts" being a data
+  // question and being a five-minute mystery.
+  if (profileError) {
+    // PGRST116 = .single() matched no row: the profiles trigger never ran for
+    // this user. The page still renders, just without a default currency.
+    pageLog.warn("dashboard.profile.load_failed", dbError(profileError));
+  }
+  if (portfoliosError) {
+    pageLog.error("dashboard.portfolios.load_failed", dbError(portfoliosError));
+  }
+
   const rows = (portfolios ?? []) as unknown as PortfolioRow[];
 
   // Scope the trend to the same accounts the balances above use. Filtering by
   // explicit ids rather than an embedded join keeps this a plain `in` filter —
   // one extra round trip, but no join semantics to get subtly wrong.
   const activeIds = rows.map((p) => p.id);
-  const { data: txns } = activeIds.length
+  const { data: txns, error: txnsError } = activeIds.length
     ? await supabase
         .from("transactions")
         .select("txn_date, signed_amount, currency_id")
         .eq("is_void", false)
         .in("portfolio_id", activeIds)
         .gte("txn_date", isoDaysAgo(TREND_DAYS))
-    : { data: [] };
+        // Explicit order + limit. Without them PostgREST applies its own
+        // max-rows cap and returns an arbitrary subset with a 200, which would
+        // silently drop flows and render a confidently wrong balance curve.
+        .order("txn_date", { ascending: true })
+        .limit(TREND_ROW_LIMIT)
+    : { data: [], error: null };
+
+  if (txnsError) {
+    // Not fatal — the balances above still render — but the trend silently
+    // flattens to today's balance, so it must not fail quietly.
+    pageLog.error("dashboard.trend.load_failed", {
+      accounts: activeIds.length,
+      since: isoDaysAgo(TREND_DAYS),
+      ...dbError(txnsError),
+    });
+  }
+
+  const txnRows = (txns ?? []) as unknown as TxnRow[];
+  // Coming back exactly at the limit means we cannot prove we saw every flow,
+  // and a partial set makes every historical point wrong. Better to show no
+  // trend than a wrong one.
+  const trendComplete = txnRows.length < TREND_ROW_LIMIT;
+  if (!trendComplete) {
+    pageLog.warn("dashboard.trend.row_limit_hit", {
+      limit: TREND_ROW_LIMIT,
+      accounts: activeIds.length,
+      hint: "trend suppressed — raise TREND_ROW_LIMIT or aggregate server-side",
+    });
+  }
 
   // Totals per currency, and per (currency, category) for the allocation bars.
   const byCurrency = new Map<
@@ -172,6 +227,13 @@ export default async function DashboardPage() {
   }
 
   if (byCurrency.size === 0) {
+    // Distinguish "new user" from "the query failed / the currency embed came
+    // back null", which look identical on screen.
+    pageLog.info("dashboard.load.empty", {
+      portfolioRows: rows.length,
+      rowsMissingCurrency: rows.filter((p) => !one(p.currency)).length,
+      durationMs: elapsed(),
+    });
     return (
       <PageContainer>
         <PageHeader title="Dashboard" />
@@ -202,12 +264,7 @@ export default async function DashboardPage() {
   const primary = byCurrency.get(primaryId)!;
   const others = ranked.filter(([id]) => id !== primaryId);
 
-  const trend = buildTrend(
-    primary.total,
-    (txns ?? []) as unknown as TxnRow[],
-    primaryId,
-    primary.currency,
-  );
+  const trend = buildTrend(primary.total, txnRows, primaryId, primary.currency);
   const opening = trend[0].value;
   const delta = roundToMinorUnit(
     primary.total - opening,
@@ -229,6 +286,22 @@ export default async function DashboardPage() {
     value,
   }));
 
+  // The figures actually rendered. When someone reports "my net worth is wrong",
+  // this line says what the page computed and from how many inputs — without it
+  // the only way to check is to re-run the maths by hand.
+  pageLog.info("dashboard.load.ok", {
+    portfolios: rows.length,
+    currencies: byCurrency.size,
+    primaryCurrency: primary.currency.code,
+    netWorth: primary.total,
+    deltaDays: TREND_DAYS,
+    delta,
+    trendTxns: txnRows.length,
+    trendComplete,
+    usedDefaultCurrency: primaryId === profile?.default_currency_id,
+    durationMs: elapsed(),
+  });
+
   return (
     <PageContainer>
       <PageHeader
@@ -246,7 +319,11 @@ export default async function DashboardPage() {
               {formatMoney(primary.total, primary.currency)}
             </p>
             <p className="mt-3 text-[13px]">
-              {delta === 0 ? (
+              {!trendComplete ? (
+                <span className="text-muted">
+                  Too many transactions in this period to chart accurately
+                </span>
+              ) : delta === 0 ? (
                 <span className="text-muted">
                   No change in the last {TREND_DAYS} days
                 </span>
@@ -271,7 +348,9 @@ export default async function DashboardPage() {
               )}
             </p>
 
-            <TrendChart points={trend} />
+            {/* Suppressed rather than approximated: a truncated flow set makes
+                every point wrong, and a wrong chart is worse than no chart. */}
+            {trendComplete ? <TrendChart points={trend} /> : null}
           </CardBody>
         </Card>
 

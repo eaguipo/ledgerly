@@ -2,6 +2,8 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import type { Metadata } from "next";
 import { createClient } from "@/lib/supabase/server";
+import { dbError, startTimer } from "@/lib/logger";
+import { requestLogger } from "@/lib/request-context";
 import { PortfolioForm } from "../portfolio-form";
 import { updatePortfolio } from "../actions";
 import { PageContainer } from "@/components/shell/page-header";
@@ -16,13 +18,24 @@ export default async function EditPortfolioPage({
 }) {
   const { id } = await params; // Next 16: route params are async.
 
+  const log = await requestLogger({ page: "/portfolios/[id]", portfolioId: id });
+  const elapsed = startTimer();
+
   const supabase = await createClient();
   const {
     data: { user },
   } = await supabase.auth.getUser();
-  if (!user) redirect("/login");
+  if (!user) {
+    log.warn("portfolio.edit.unauthenticated");
+    redirect("/login");
+  }
 
-  const [{ data: portfolio }, { data: currencies }] = await Promise.all([
+  const pageLog = log.child({ userId: user.id });
+
+  const [
+    { data: portfolio, error: portfolioError },
+    { data: currencies, error: currenciesError },
+  ] = await Promise.all([
     supabase
       .from("portfolios")
       .select("id, name, category, currency_id, is_savings, institution")
@@ -35,7 +48,26 @@ export default async function EditPortfolioPage({
       .order("code"),
   ]);
 
-  if (!portfolio) redirect("/portfolios");
+  if (currenciesError) {
+    pageLog.error("portfolio.edit.currencies_failed", dbError(currenciesError));
+  }
+
+  if (!portfolio) {
+    // Bouncing to /portfolios looks the same whether the id is a typo, the
+    // account belongs to someone else (RLS returned nothing), or the query
+    // errored outright. PGRST116 = "no rows", anything else is a real failure.
+    pageLog.warn("portfolio.edit.not_found", {
+      redirectedTo: "/portfolios",
+      durationMs: elapsed(),
+      ...(portfolioError ? dbError(portfolioError) : {}),
+    });
+    redirect("/portfolios");
+  }
+
+  pageLog.debug("portfolio.edit.load_ok", {
+    currencyOptions: currencies?.length ?? 0,
+    durationMs: elapsed(),
+  });
 
   return (
     <PageContainer>

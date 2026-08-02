@@ -3,6 +3,8 @@ import { redirect } from "next/navigation";
 import type { Metadata } from "next";
 import { createClient } from "@/lib/supabase/server";
 import { gatewayFetch } from "@/lib/gateway";
+import { startTimer } from "@/lib/logger";
+import { requestLogger } from "@/lib/request-context";
 import { ExpenseForm } from "./expense-form";
 import { PageContainer, PageHeader } from "@/components/shell/page-header";
 import { Card, CardBody, CardHeader } from "@/components/ui/card";
@@ -56,11 +58,19 @@ function formatDate(iso: string) {
 }
 
 export default async function ExpensesPage() {
+  const log = await requestLogger({ page: "/expenses" });
+  const elapsed = startTimer();
+
   const supabase = await createClient();
   const {
     data: { user },
   } = await supabase.auth.getUser();
-  if (!user) redirect("/login");
+  if (!user) {
+    log.warn("expenses.load.unauthenticated");
+    redirect("/login");
+  }
+
+  const pageLog = log.child({ userId: user.id });
 
   // Reads go through the api-gateway → ledger-service (no direct DB access).
   const [optionsRes, listRes] = await Promise.all([
@@ -87,6 +97,34 @@ export default async function ExpensesPage() {
   // mesh is down.
   const serviceError = !optionsRes.ok || !listRes.ok;
   const hasAccounts = portfolios.length > 0;
+
+  // gatewayFetch already logged each call; this line records what the PAGE
+  // concluded from them — which of the two failed, and what the user ends up
+  // seeing (a degraded page, an empty state, or the real list).
+  if (serviceError) {
+    pageLog.error("expenses.load.degraded", {
+      optionsStatus: optionsRes.status,
+      listStatus: listRes.status,
+      failed: [
+        !optionsRes.ok ? "options" : null,
+        !listRes.ok ? "list" : null,
+      ].filter(Boolean),
+      durationMs: elapsed(),
+    });
+  } else {
+    pageLog.info("expenses.load.ok", {
+      expenses: rows.length,
+      accounts: portfolios.length,
+      categories: categories.length,
+      // No accounts means the form is replaced by a prompt to add one — a
+      // frequent "the form disappeared" report that is actually correct.
+      formAvailable: hasAccounts,
+      // A row whose transaction embed is null is dropped from the table, so the
+      // count on screen would be lower than the count fetched.
+      rowsMissingTransaction: rows.filter((e) => !one(e.transaction)).length,
+      durationMs: elapsed(),
+    });
+  }
 
   return (
     <PageContainer>
@@ -128,6 +166,7 @@ export default async function ExpensesPage() {
               </CardBody>
             ) : (
               <Table
+                label="Recent expenses"
                 head={
                   <>
                     <Th>Date</Th>

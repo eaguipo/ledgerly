@@ -30,11 +30,11 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  // Matches --canvas in globals.css so mobile browser chrome blends in.
-  themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#f6f4ef" },
-    { media: "(prefers-color-scheme: dark)", color: "#0e1311" },
-  ],
+  // A single colour, NOT one per prefers-color-scheme: the theme here is
+  // class-driven and user-overridable, so media-keyed values would leave the
+  // mobile browser chrome inverted whenever the toggle disagrees with the OS.
+  // The inline script below rewrites this tag to match the theme it applies.
+  themeColor: "#0e1311",
 };
 
 /*
@@ -43,7 +43,7 @@ export const viewport: Viewport = {
  * would otherwise only learn the stored preference after hydration.
  * See: node_modules/next/dist/docs/01-app/02-guides/preventing-flash-before-hydration.md
  */
-const themeScript = `(function(){try{var t=localStorage.getItem("ledgerly-theme");if(t!=="light"&&t!=="dark"){t=window.matchMedia("(prefers-color-scheme: light)").matches?"light":"dark"}document.documentElement.classList.toggle("dark",t==="dark")}catch(e){document.documentElement.classList.add("dark")}})()`;
+const themeScript = `(function(){try{var t=localStorage.getItem("ledgerly-theme");if(t!=="light"&&t!=="dark"){t=window.matchMedia("(prefers-color-scheme: light)").matches?"light":"dark"}document.documentElement.classList.toggle("dark",t==="dark");var m=document.querySelector('meta[name="theme-color"]');if(m){m.setAttribute("content",t==="dark"?"#0e1311":"#f6f4ef")}}catch(e){document.documentElement.classList.add("dark")}})()`;
 
 export default function RootLayout({
   children,

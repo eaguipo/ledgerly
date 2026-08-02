@@ -7,9 +7,17 @@
 export function Logo({
   size = 28,
   className,
+  /**
+   * Decorative by default: every current caller renders the mark immediately
+   * beside the visible word "Ledgerly", and labelling it too makes screen
+   * readers announce the brand name twice in a row. Pass `decorative={false}`
+   * when the mark ever stands alone without adjacent text.
+   */
+  decorative = true,
 }: {
   size?: number;
   className?: string;
+  decorative?: boolean;
 }) {
   return (
     <svg
@@ -18,8 +26,9 @@ export function Logo({
       viewBox="0 0 64 64"
       fill="none"
       className={className}
-      role="img"
-      aria-label="Ledgerly"
+      {...(decorative
+        ? { "aria-hidden": true }
+        : { role: "img", "aria-label": "Ledgerly" })}
     >
       <rect width="64" height="64" rx="16" fill="#123328" />
       <path

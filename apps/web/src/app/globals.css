@@ -23,6 +23,7 @@
   --color-raised: var(--raised);
   --color-line: var(--line);
   --color-line-strong: var(--line-strong);
+  --color-field-border: var(--field-border);
 
   --color-ink: var(--ink);
   --color-muted: var(--muted);
@@ -48,10 +49,16 @@
   --raised: #f1eee7;
   --line: #e4dfd4;
   --line-strong: #d3ccbd;
+  /* Interactive controls need 3:1 against their surroundings (WCAG 1.4.11).
+     Decorative card hairlines do not, so `line` stays quiet and only form
+     controls use this stronger value. Measured: 3.48 on surface, 3.00 on raised. */
+  --field-border: #8e897f;
 
   --ink: #16201b;
   --muted: #63706a;
-  --faint: #8b968f;
+  /* 4.53:1 on `raised`, its worst background — `faint` carries real content
+     (notes, institutions, hints), so it must clear AA body text, not just 3:1. */
+  --faint: #666e69;
 
   --accent: #1f6b4a;
   --accent-hover: #185840;
@@ -72,10 +79,13 @@
   --raised: #1c2420;
   --line: #26302b;
   --line-strong: #35413a;
+  /* 3.31 on surface, 3.01 on raised — see the light-mode note above. */
+  --field-border: #656e68;
 
   --ink: #f2efe6;
   --muted: #96a29c;
-  --faint: #6c7a73;
+  /* 4.53:1 on `raised`, its worst background. */
+  --faint: #7f8c85;
 
   --accent: #7fbfa0;
   --accent-hover: #96cfb2;
