@@ -30,10 +30,15 @@ Run order in the Supabase SQL Editor:
    a rebuild-from-ledger safety net. (For a beginner you can also just sum the ledger on read —
    pick one and stay consistent.)
 
-3. **Transfers via a `do_transfer()` RPC.** It locks both portfolios (`SELECT … FOR UPDATE`),
-   checks the source has enough, then writes a `transfer_out` + `transfer_in` pair atomically.
-   Clients can't write the `transfers` table directly — they must call the RPC. This enforces
-   Rules 11 (deduct + add) and 12 (no overdraft) safely against race conditions.
+3. **Transfers via an RPC.** It locks both portfolios (`SELECT … FOR UPDATE`), checks the source has
+   enough, then writes a `transfer_out` + `transfer_in` pair atomically. Clients can't write the
+   `transfers` table directly — they must call the RPC. This enforces Rules 11 (deduct + add) and
+   12 (no overdraft) safely against race conditions.
+
+   There are two, differing only in how they learn who is calling: `do_transfer()` reads
+   `auth.uid()` (the RLS path, granted to `authenticated`), while `create_transfer()` takes
+   `_user_id` as a parameter and is granted to `service_role` — that is the one ledger-service
+   calls, since `auth.uid()` is NULL under the service role. Same body otherwise; keep them in sync.
 
 4. **Transfers are excluded from inflow/outflow.** The cashflow view only counts
    income / expense / debt-payment kinds, so moving money between your own accounts never inflates

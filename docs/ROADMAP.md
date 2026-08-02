@@ -44,10 +44,14 @@ legitimate v1 you could stop at.
 
 **Goal:** complete the money-in / money-between picture. Reuses the existing ledger — small surface.
 
-- **Income:** income form (salary / business / debt payment received / other); inserting income
-  increments the portfolio balance.
-- **Transfers:** call the `do_transfer()` RPC — deduct source, add destination (Rule 11), block if
-  source balance is insufficient (Rule 12). Surface the insufficient-funds error nicely in the UI.
+- **Income:** ✅ income form (salary / business / gains / debt payment received / gift / other);
+  inserting income increments the portfolio balance. Adds the `create_income()` RPC and widens the
+  `income_source` enum. Recording a debt payment here does *not* yet reduce a tracked debt —
+  `incomes.debt_id` stays null until Phase 3 links the two.
+- **Transfers:** ✅ deduct source, add destination (Rule 11), block if source balance is
+  insufficient (Rule 12); insufficient-funds surfaces as a 400 with the DB's own message. Note this
+  calls `create_transfer()`, **not** `do_transfer()` — the latter derives identity from `auth.uid()`
+  and cannot work from ledger-service, which holds the service-role key. See MAINTENANCE §5.6.
 - **Dashboard v0:** total inflow vs outflow for the current month + a per-portfolio balance list.
 
 **Deliverable:** record income, move money between portfolios safely, see a basic monthly

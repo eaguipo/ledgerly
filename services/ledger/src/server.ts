@@ -300,6 +300,404 @@ app.post("/expenses", async (req, reply) => {
   return reply.code(201).send({ expense: data });
 });
 
+// The income row shape the web app renders. `incomes` mirrors `expenses`: two
+// foreign keys to `transactions`, so the composite FK name disambiguates the embed.
+const INCOME_SELECT =
+  "id, source, source_name, is_recurring, " +
+  "transaction:transactions!incomes_txn_kind_fk(id, amount, txn_date, description, " +
+  "currency:currencies(code, symbol, minor_unit), portfolio:portfolios(name))";
+
+// `transfers` carries two FKs to portfolios and two to currencies; the !column
+// hints tell PostgREST which leg each embed belongs to. The three transaction
+// legs are deliberately not embedded — the list renders from the transfer row
+// itself, which already holds both amounts.
+const TRANSFER_SELECT =
+  "id, amount, fee, exchange_rate, amount_received, txn_date, note, " +
+  "from_portfolio:portfolios!from_portfolio_id(name), " +
+  "to_portfolio:portfolios!to_portfolio_id(name), " +
+  "from_currency:currencies!from_currency_id(code, symbol, minor_unit), " +
+  "to_currency:currencies!to_currency_id(code, symbol, minor_unit)";
+
+// Mirrors the public.income_source enum. Validating here turns a bad value into
+// a clean 400 instead of a Postgres "invalid input value for enum" 500.
+const INCOME_SOURCES = new Set([
+  "salary",
+  "business",
+  "gains",
+  "debt_payment_received",
+  "gift",
+  "other",
+]);
+
+/** The user's active accounts, with the currency the transfer form needs. */
+async function activePortfolios(userId: string) {
+  return admin()
+    .from("portfolios")
+    .select(
+      "id, name, current_balance, currency:currencies(code, symbol, minor_unit)",
+    )
+    .eq("user_id", userId)
+    .eq("is_archived", false)
+    .order("sort_order")
+    .order("created_at");
+}
+
+// Recent income entries for the current user.
+app.get("/incomes", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+  const q = req.query as { limit?: string };
+  const limit = Math.min(Math.max(Number(q.limit) || 30, 1), 200);
+  const startedAt = process.hrtime.bigint();
+
+  const { data, error } = await admin()
+    .from("incomes")
+    .select(INCOME_SELECT)
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    req.log.error(
+      { userId, limit, dbMs: since(startedAt), ...dbErrorFields(error) },
+      "ledger.incomes.list_failed",
+    );
+    return reply.code(500).send({ error: error.message });
+  }
+
+  req.log.debug(
+    { userId, limit, returned: data?.length ?? 0, dbMs: since(startedAt) },
+    "ledger.incomes.list_ok",
+  );
+  return { incomes: data ?? [] };
+});
+
+// Form options: the user's active accounts. Income sources are a fixed enum and
+// are labelled in the web layer, the same way portfolio categories are.
+app.get("/incomes/options", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+  const startedAt = process.hrtime.bigint();
+
+  const { data, error } = await activePortfolios(userId);
+
+  if (error) {
+    req.log.error(
+      { userId, dbMs: since(startedAt), ...dbErrorFields(error) },
+      "ledger.incomes.options_failed",
+    );
+    return reply.code(500).send({ error: error.message });
+  }
+
+  const count = data?.length ?? 0;
+  if (count === 0) {
+    req.log.warn(
+      {
+        userId,
+        portfolios: 0,
+        dbMs: since(startedAt),
+        hint: "income form will be unavailable — user has no active accounts",
+      },
+      "ledger.incomes.options_empty",
+    );
+  } else {
+    req.log.debug(
+      { userId, portfolios: count, dbMs: since(startedAt) },
+      "ledger.incomes.options_ok",
+    );
+  }
+
+  return { portfolios: data ?? [] };
+});
+
+// Record income atomically via the create_income RPC.
+app.post("/incomes", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+
+  const b = (req.body ?? {}) as Record<string, unknown>;
+  const amount = Number(b.amount);
+  const portfolioId = String(b.portfolio_id ?? "");
+  const source = String(b.source ?? "");
+  const txnDate = String(b.txn_date ?? "");
+  const sourceName = b.source_name ? String(b.source_name) : null;
+  const description = b.description ? String(b.description) : null;
+  const isRecurring = b.is_recurring === true;
+
+  // Free text (source_name/description) stays out of the logs — it is the
+  // user's private data and tells you nothing when debugging.
+  req.log.debug(
+    {
+      userId,
+      amount,
+      portfolioId,
+      source,
+      txnDate,
+      isRecurring,
+      hasSourceName: sourceName !== null,
+      hasDescription: description !== null,
+    },
+    "ledger.income.create_start",
+  );
+
+  const invalid = (field: string, message: string) => {
+    req.log.warn(
+      { userId, field, amount, portfolioId, source, txnDate },
+      "ledger.income.create_invalid",
+    );
+    return reply.code(400).send({ error: message });
+  };
+
+  if (!Number.isFinite(amount) || amount <= 0)
+    return invalid("amount", "Amount must be greater than zero.");
+  if (!UUID_RE.test(portfolioId))
+    return invalid("portfolio_id", "Select an account.");
+  if (!INCOME_SOURCES.has(source))
+    return invalid("source", "Select where the money came from.");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(txnDate))
+    return invalid("txn_date", "Date is required.");
+
+  const startedAt = process.hrtime.bigint();
+  const { data, error } = await admin().rpc("create_income", {
+    _user_id: userId,
+    _portfolio_id: portfolioId,
+    _amount: amount,
+    _source: source,
+    _txn_date: txnDate,
+    _source_name: sourceName,
+    _description: description,
+    _is_recurring: isRecurring,
+  });
+
+  if (error) {
+    // Same split as create_expense: P0001/P0002/23514 are guards doing their job
+    // (400); 42883/PGRST202 mean create_income.sql was never applied or the
+    // schema cache is stale — a deploy problem worth spotting immediately.
+    req.log.warn(
+      {
+        userId,
+        amount,
+        portfolioId,
+        source,
+        txnDate,
+        dbMs: since(startedAt),
+        ...dbErrorFields(error),
+      },
+      "ledger.income.create_rejected",
+    );
+    return reply.code(400).send({ error: error.message });
+  }
+
+  const created = (data ?? {}) as {
+    income_id?: string;
+    transaction_id?: string;
+  };
+
+  req.log.info(
+    {
+      userId,
+      incomeId: created.income_id,
+      transactionId: created.transaction_id,
+      amount,
+      portfolioId,
+      source,
+      txnDate,
+      dbMs: since(startedAt),
+    },
+    "ledger.income.create_ok",
+  );
+  return reply.code(201).send({ income: data });
+});
+
+// Recent transfers for the current user.
+app.get("/transfers", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+  const q = req.query as { limit?: string };
+  const limit = Math.min(Math.max(Number(q.limit) || 30, 1), 200);
+  const startedAt = process.hrtime.bigint();
+
+  const { data, error } = await admin()
+    .from("transfers")
+    .select(TRANSFER_SELECT)
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    req.log.error(
+      { userId, limit, dbMs: since(startedAt), ...dbErrorFields(error) },
+      "ledger.transfers.list_failed",
+    );
+    return reply.code(500).send({ error: error.message });
+  }
+
+  req.log.debug(
+    { userId, limit, returned: data?.length ?? 0, dbMs: since(startedAt) },
+    "ledger.transfers.list_ok",
+  );
+  return { transfers: data ?? [] };
+});
+
+// Form options: active accounts with currency + balance. The form needs the
+// currency to decide whether to ask for an exchange rate, and the balance to
+// warn before the DB's overdraft guard has to.
+app.get("/transfers/options", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+  const startedAt = process.hrtime.bigint();
+
+  const { data, error } = await activePortfolios(userId);
+
+  if (error) {
+    req.log.error(
+      { userId, dbMs: since(startedAt), ...dbErrorFields(error) },
+      "ledger.transfers.options_failed",
+    );
+    return reply.code(500).send({ error: error.message });
+  }
+
+  const count = data?.length ?? 0;
+  // Transfers need TWO accounts, not one — a single-account user sees the same
+  // disabled form as a zero-account one, which is a common "why is it greyed
+  // out" report.
+  if (count < 2) {
+    req.log.warn(
+      {
+        userId,
+        portfolios: count,
+        dbMs: since(startedAt),
+        hint: "transfer form will be unavailable — needs at least two active accounts",
+      },
+      "ledger.transfers.options_insufficient",
+    );
+  } else {
+    req.log.debug(
+      { userId, portfolios: count, dbMs: since(startedAt) },
+      "ledger.transfers.options_ok",
+    );
+  }
+
+  return { portfolios: data ?? [] };
+});
+
+// Move money between two accounts atomically via the create_transfer RPC.
+app.post("/transfers", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+
+  const b = (req.body ?? {}) as Record<string, unknown>;
+  const amount = Number(b.amount);
+  const fee = b.fee === undefined || b.fee === null || b.fee === "" ? 0 : Number(b.fee);
+  const exchangeRate =
+    b.exchange_rate === undefined || b.exchange_rate === null || b.exchange_rate === ""
+      ? 1
+      : Number(b.exchange_rate);
+  const fromPortfolioId = String(b.from_portfolio_id ?? "");
+  const toPortfolioId = String(b.to_portfolio_id ?? "");
+  const txnDate = String(b.txn_date ?? "");
+  const note = b.note ? String(b.note) : null;
+
+  req.log.debug(
+    {
+      userId,
+      amount,
+      fee,
+      exchangeRate,
+      fromPortfolioId,
+      toPortfolioId,
+      txnDate,
+      hasNote: note !== null,
+    },
+    "ledger.transfer.create_start",
+  );
+
+  const invalid = (field: string, message: string) => {
+    req.log.warn(
+      { userId, field, amount, fee, exchangeRate, fromPortfolioId, toPortfolioId, txnDate },
+      "ledger.transfer.create_invalid",
+    );
+    return reply.code(400).send({ error: message });
+  };
+
+  if (!Number.isFinite(amount) || amount <= 0)
+    return invalid("amount", "Amount must be greater than zero.");
+  if (!Number.isFinite(fee) || fee < 0)
+    return invalid("fee", "Fee cannot be negative.");
+  if (!Number.isFinite(exchangeRate) || exchangeRate <= 0)
+    return invalid("exchange_rate", "Exchange rate must be greater than zero.");
+  if (!UUID_RE.test(fromPortfolioId))
+    return invalid("from_portfolio_id", "Select the account to move money from.");
+  if (!UUID_RE.test(toPortfolioId))
+    return invalid("to_portfolio_id", "Select the account to move money to.");
+  if (fromPortfolioId === toPortfolioId)
+    return invalid("to_portfolio_id", "Pick two different accounts.");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(txnDate))
+    return invalid("txn_date", "Date is required.");
+
+  const startedAt = process.hrtime.bigint();
+  const { data, error } = await admin().rpc("create_transfer", {
+    _user_id: userId,
+    _from_portfolio: fromPortfolioId,
+    _to_portfolio: toPortfolioId,
+    _amount: amount,
+    _fee: fee,
+    _exchange_rate: exchangeRate,
+    _txn_date: txnDate,
+    _note: note,
+  });
+
+  if (error) {
+    // Insufficient funds and "converted amount rounds to zero" both land here as
+    // P0001 raises — user-facing guards, hence 400 rather than 500.
+    req.log.warn(
+      {
+        userId,
+        amount,
+        fee,
+        exchangeRate,
+        fromPortfolioId,
+        toPortfolioId,
+        txnDate,
+        dbMs: since(startedAt),
+        ...dbErrorFields(error),
+      },
+      "ledger.transfer.create_rejected",
+    );
+    return reply.code(400).send({ error: error.message });
+  }
+
+  const created = (data ?? {}) as {
+    transfer_id?: string;
+    out_transaction_id?: string;
+    in_transaction_id?: string;
+    fee_transaction_id?: string | null;
+    amount_received?: string;
+  };
+
+  // Both legs logged: a transfer that debits but never credits is the failure
+  // mode worth being able to prove did not happen.
+  req.log.info(
+    {
+      userId,
+      transferId: created.transfer_id,
+      outTransactionId: created.out_transaction_id,
+      inTransactionId: created.in_transaction_id,
+      feeTransactionId: created.fee_transaction_id ?? null,
+      amount,
+      amountReceived: created.amount_received,
+      fee,
+      exchangeRate,
+      fromPortfolioId,
+      toPortfolioId,
+      txnDate,
+      dbMs: since(startedAt),
+    },
+    "ledger.transfer.create_ok",
+  );
+  return reply.code(201).send({ transfer: data });
+});
+
 installProcessLogging(app);
 
 app
