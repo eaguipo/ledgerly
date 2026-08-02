@@ -116,7 +116,9 @@ create policy expenses_insert on public.expenses for insert to authenticated
 create policy expenses_update on public.expenses for update to authenticated using (user_id = auth.uid() and public.has_feature('expenses')) with check (user_id = auth.uid() and public.has_feature('expenses'));
 create policy expenses_delete on public.expenses for delete to authenticated using (user_id = auth.uid() and public.has_feature('expenses'));
 
--- transfers: created only by do_transfer() RPC. Owner reads; no direct writes.
+-- transfers: created only by RPC — do_transfer() on the RLS path, or
+-- create_transfer() when ledger-service calls in as service_role. Owner reads;
+-- no direct writes either way.
 alter table public.transfers enable row level security;
 create policy transfers_select on public.transfers for select to authenticated using (user_id = auth.uid());
 
@@ -180,7 +182,7 @@ grant select, insert, update, delete on
   public.debts, public.debt_payments, public.goals, public.goal_contributions,
   public.investments, public.investment_snapshots, public.user_feature_access
 to authenticated;
-grant select on public.transfers to authenticated;   -- writes via do_transfer() only
+grant select on public.transfers to authenticated;   -- writes via transfer RPCs only
 grant select on public.audit_log to authenticated;    -- RLS limits to admins
 grant select on
   public.v_portfolio_balances, public.v_liquid_by_currency, public.v_cashflow,

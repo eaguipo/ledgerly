@@ -46,16 +46,23 @@ personal-finance-tracker/
 │   │   │   ├── page.tsx, [id]/page.tsx, portfolio-form.tsx
 │   │   │   ├── actions.ts         create/update/archive/restore Server Actions
 │   │   │   └── constants.ts       portfolio category enum, mirrors the DB enum
-│   │   └── expenses/              expenses (through the mesh, NOT direct Supabase)
-│   │       ├── page.tsx           reads via gatewayFetch
-│   │       ├── actions.ts         createExpense Server Action → POST /ledger/expenses
-│   │       └── expense-form.tsx   client component, useActionState
+│   │   ├── expenses/              expenses (through the mesh, NOT direct Supabase)
+│   │   │   ├── page.tsx           reads via gatewayFetch
+│   │   │   ├── actions.ts         createExpense Server Action → POST /ledger/expenses
+│   │   │   └── expense-form.tsx   client component, useActionState
+│   │   ├── income/                money in from outside (through the mesh)
+│   │   │   ├── page.tsx, income-form.tsx
+│   │   │   ├── actions.ts         createIncome → POST /ledger/incomes
+│   │   │   └── constants.ts       income source enum, mirrors the DB enum
+│   │   └── transfers/             money between own accounts (through the mesh)
+│   │       ├── page.tsx, transfer-form.tsx
+│   │       └── actions.ts         createTransfer → POST /ledger/transfers
 │   ├── Dockerfile                 prod image (standalone output; NEXT_PUBLIC_* are BUILD args)
 │   ├── Dockerfile.dev             dev image (next dev; Tilt live-syncs src/)
 │   └── AGENTS.md                  "this is not the Next.js you know" — read the bundled docs
 │
 ├── services/api-gateway/src/server.ts   JWT validation + reverse proxy. No database access.
-├── services/ledger/src/server.ts        expense endpoints. Service-role DB access.
+├── services/ledger/src/server.ts        expense / income / transfer endpoints. Service-role DB access.
 ├── services/ledger/src/supabase.ts      service-role client factory (bypasses RLS)
 │
 ├── deploy/helm/charts/service/    generic reusable chart: Deployment, Service, Ingress,
@@ -71,7 +78,10 @@ personal-finance-tracker/
 ├── db/schema.sql                  18 tables, 17 functions, 26 triggers, 7 views
 ├── db/policies.sql                54 RLS policies + grants
 ├── db/seed.sql                    currencies, feature catalog, per-user back-fills
-└── db/functions/create_expense.sql  the atomic expense RPC (run separately)
+└── db/functions/                  atomic money RPCs, run separately after schema/policies
+    ├── create_expense.sql
+    ├── create_income.sql          also widens the income_source enum (gains, gift)
+    └── create_transfer.sql        service-role sibling of do_transfer()
 ```
 
 ---
@@ -162,9 +172,16 @@ Key mechanics:
 - **Guards fire on `transactions`, not on the API.** `txn_overdraft_guard()` blocks any outflow that
   would push a non-`allow_negative` portfolio below zero, whatever wrote it.
   `txn_enforce_currency()` requires the transaction currency to match the portfolio's.
-- **Money RPCs are the write path for anything multi-row**: `do_transfer()`, `do_debt_payment()`,
-  `create_expense()`. Each runs in one transaction and locks what it needs. Clients cannot write
-  `transfers` directly.
+- **Money RPCs are the write path for anything multi-row**: `create_expense()`, `create_income()`,
+  `create_transfer()`, `do_transfer()`, `do_debt_payment()`. Each runs in one transaction and locks
+  what it needs. Clients cannot write `transfers` directly.
+- **Two RPC dialects, and picking the wrong one fails confusingly.** The older `do_*` functions read
+  identity from `auth.uid()` and are granted to `authenticated` — the RLS path. The newer `create_*`
+  functions take `_user_id` explicitly and are granted to `service_role` — the path ledger-service
+  uses. Calling a `do_*` function as service_role makes `auth.uid()` NULL, so every ownership lookup
+  misses and you get "not found or not owned by you" for a row that plainly exists. `create_transfer`
+  exists precisely because `do_transfer` cannot be called from the service. Keep the two in sync
+  until `do_transfer` is retired.
 - **All 7 reporting views are `security_invoker = true`** so RLS on the base tables applies. A plain
   `CREATE VIEW` runs as the owner and would leak every tenant's finances — this was the critical bug
   caught in the schema review. If you add a view, you must add this option.
@@ -632,7 +649,10 @@ Health probes are excluded from the services' request logging (`quietLogControll
 | 403 "forbidden" from ledger | both `secretEnv` blocks | `INTERNAL_API_SECRET` mismatch between gateway and ledger |
 | 502 "upstream unavailable" | gateway logs (`gateway.proxy.failed` — check its `timedOut` field) | Ledger pod down, wrong `LEDGER_URL`, NetworkPolicy blocking, or a >10s upstream (`UPSTREAM_TIMEOUT_MS`) |
 | 500 from ledger with a PostgREST message | ledger logs | Schema drift: renamed column, missing FK, ambiguous embed (§7) |
-| 400 "Account not found or archived" | `create_expense` | Portfolio belongs to another user, doesn't exist, or is archived |
+| 400 "Account not found or archived" | `create_expense` / `create_income` / `create_transfer` | Portfolio belongs to another user, doesn't exist, or is archived |
+| 400 "Could not find the function public.create_…" (PGRST202/42883) | `db/functions/` | The RPC file was never run in the SQL Editor, or PostgREST's schema cache is stale — re-run the file (it ends with `notify pgrst, 'reload schema'`) |
+| 400 "invalid input value for enum income_source" | `create_income.sql` STEP 1 | The `alter type … add value` half was skipped, so `gains`/`gift` don't exist in the DB yet |
+| Transfer says "not found or not owned by you" for an account you can see | which RPC is being called | `do_transfer()` was called as service_role — `auth.uid()` is NULL there. Use `create_transfer()` (§5.6) |
 | 400 "Insufficient funds…" | `txn_overdraft_guard` | Real overdraft, or a drifted `current_balance` cache |
 | "Transaction currency must match portfolio currency" | `txn_enforce_currency` | Code derived the currency from the wrong place — always take it from the portfolio |
 | Balances wrong after edits | `apply_txn_to_balance` | A void/update path that didn't go through the trigger; run `select reconcile_portfolio_balances();` |

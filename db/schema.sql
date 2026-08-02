@@ -23,7 +23,7 @@ create type public.txn_kind          as enum (
   'income','expense','transfer_out','transfer_in',
   'debt_payment_made','debt_payment_received','adjustment','opening_balance');
 create type public.txn_direction     as enum ('inflow','outflow');
-create type public.income_source     as enum ('salary','business','debt_payment_received','other');
+create type public.income_source     as enum ('salary','business','gains','debt_payment_received','gift','other');
 create type public.debt_kind         as enum ('payable','receivable');
 create type public.debt_status       as enum ('open','partially_paid','settled','written_off');
 create type public.goal_status       as enum ('active','achieved','archived','cancelled');

@@ -43,8 +43,32 @@ function ExpensesIcon({ className }: IconProps) {
   );
 }
 
+function IncomeIcon({ className }: IconProps) {
+  return (
+    <svg {...stroke} className={className} aria-hidden>
+      <path d="M12 3.5v9.5" />
+      <path d="M8.5 9.5L12 13l3.5-3.5" />
+      <path d="M4 15v3.5a1.5 1.5 0 001.5 1.5h13a1.5 1.5 0 001.5-1.5V15" />
+    </svg>
+  );
+}
+
+function TransfersIcon({ className }: IconProps) {
+  return (
+    <svg {...stroke} className={className} aria-hidden>
+      <path d="M4 9h13" />
+      <path d="M14 6l3 3-3 3" />
+      <path d="M20 15H7" />
+      <path d="M10 12l-3 3 3 3" />
+    </svg>
+  );
+}
+
+// Ordered by how money actually moves: where it sits, in, out, between.
 export const NAV_ITEMS = [
   { href: "/dashboard", label: "Dashboard", Icon: DashboardIcon },
   { href: "/portfolios", label: "Portfolios", Icon: PortfoliosIcon },
+  { href: "/income", label: "Income", Icon: IncomeIcon },
   { href: "/expenses", label: "Expenses", Icon: ExpensesIcon },
+  { href: "/transfers", label: "Transfers", Icon: TransfersIcon },
 ] as const;
