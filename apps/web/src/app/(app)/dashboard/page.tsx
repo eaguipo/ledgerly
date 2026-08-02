@@ -40,6 +40,14 @@ interface TxnRow {
   currency_id: string;
 }
 
+/** Only the fields the headline debt figures need — see the query below. */
+interface DebtSummaryRow {
+  kind: string;
+  outstanding_balance: number | string;
+  currency_id: string;
+  due_date: string | null;
+}
+
 function one<T>(v: T | T[] | null | undefined): T | undefined {
   return (Array.isArray(v) ? v[0] : v) ?? undefined;
 }
@@ -135,6 +143,7 @@ export default async function DashboardPage() {
   const [
     { data: profile, error: profileError },
     { data: portfolios, error: portfoliosError },
+    { data: debts, error: debtsError },
   ] = await Promise.all([
     supabase
       .from("profiles")
@@ -147,6 +156,14 @@ export default async function DashboardPage() {
         "id, category, current_balance, currency_id, currency:currencies(id, code, symbol, minor_unit)",
       )
       .eq("is_archived", false),
+    // Settled and written-off debts are excluded here rather than in the render:
+    // neither is money anyone still expects to move, and a written-off debt keeps
+    // a non-zero outstanding balance that would otherwise inflate the total.
+    supabase
+      .from("debts")
+      .select("kind, outstanding_balance, currency_id, due_date")
+      .eq("is_archived", false)
+      .in("status", ["open", "partially_paid"]),
   ]);
 
   // These queries discard their errors into an empty render. Logging them is the
@@ -159,6 +176,11 @@ export default async function DashboardPage() {
   }
   if (portfoliosError) {
     pageLog.error("dashboard.portfolios.load_failed", dbError(portfoliosError));
+  }
+  if (debtsError) {
+    // Not fatal — the debt card just doesn't render — but silently dropping it
+    // reads as "I have no debts", which is the wrong thing to believe.
+    pageLog.error("dashboard.debts.load_failed", dbError(debtsError));
   }
 
   const rows = (portfolios ?? []) as unknown as PortfolioRow[];
@@ -286,6 +308,23 @@ export default async function DashboardPage() {
     value,
   }));
 
+  // Debt totals for the primary currency only, for the same reason net worth is
+  // single-currency: there are no FX rates, so a combined figure would be made
+  // up. Debts in other currencies still count toward the overdue nudge, which is
+  // a count and needs no conversion.
+  const debtRows = (debts ?? []) as unknown as DebtSummaryRow[];
+  const today = isoDaysAgo(0);
+  const owed = debtRows
+    .filter((d) => d.kind === "payable" && d.currency_id === primaryId)
+    .reduce((sum, d) => sum + Number(d.outstanding_balance), 0);
+  const owedToYou = debtRows
+    .filter((d) => d.kind === "receivable" && d.currency_id === primaryId)
+    .reduce((sum, d) => sum + Number(d.outstanding_balance), 0);
+  const overdueCount = debtRows.filter(
+    (d) => d.due_date !== null && d.due_date < today,
+  ).length;
+  const hasDebts = debtRows.length > 0;
+
   // The figures actually rendered. When someone reports "my net worth is wrong",
   // this line says what the page computed and from how many inputs — without it
   // the only way to check is to re-run the maths by hand.
@@ -299,6 +338,10 @@ export default async function DashboardPage() {
     trendTxns: txnRows.length,
     trendComplete,
     usedDefaultCurrency: primaryId === profile?.default_currency_id,
+    liveDebts: debtRows.length,
+    debtOwed: owed,
+    debtOwedToYou: owedToYou,
+    debtsOverdue: overdueCount,
     durationMs: elapsed(),
   });
 
@@ -364,6 +407,48 @@ export default async function DashboardPage() {
           </CardBody>
         </Card>
       </div>
+
+      {hasDebts ? (
+        <Card className="mt-5">
+          <CardHeader
+            title="Debts"
+            description={`Outstanding in ${primary.currency.code}`}
+            action={
+              <ButtonLink href="/debts" variant="secondary" size="sm">
+                View all
+              </ButtonLink>
+            }
+          />
+          <CardBody>
+            <ul className="grid gap-4 sm:grid-cols-3">
+              <li>
+                <Eyebrow>You owe</Eyebrow>
+                <p className="mt-1.5 text-lg font-semibold text-ink">
+                  <Money amount={owed} currency={primary.currency} />
+                </p>
+              </li>
+              <li>
+                <Eyebrow>Owed to you</Eyebrow>
+                <p className="mt-1.5 text-lg font-semibold text-ink">
+                  <Money amount={owedToYou} currency={primary.currency} />
+                </p>
+              </li>
+              <li>
+                <Eyebrow>Past due</Eyebrow>
+                <p
+                  className={
+                    overdueCount > 0
+                      ? "mt-1.5 text-lg font-semibold text-negative"
+                      : "mt-1.5 text-lg font-semibold text-ink"
+                  }
+                >
+                  {overdueCount}
+                </p>
+              </li>
+            </ul>
+          </CardBody>
+        </Card>
+      ) : null}
 
       {others.length > 0 ? (
         <Card className="mt-5">

@@ -698,6 +698,540 @@ app.post("/transfers", async (req, reply) => {
   return reply.code(201).send({ transfer: data });
 });
 
+// ---------------------------------------------------------------------------
+// DEBTS (Phase 3)
+// ---------------------------------------------------------------------------
+
+// Debts carry their own currency (a debt can be in a currency you hold no
+// account in), so the currency embed is not optional here the way it is on rows
+// that inherit it from a portfolio.
+const DEBT_SELECT =
+  "id, kind, counterparty, principal_amount, outstanding_balance, interest_rate, " +
+  "status, due_date, note, is_archived, created_at, " +
+  "currency:currencies(code, symbol, minor_unit)";
+
+const DEBT_PAYMENT_SELECT =
+  "id, amount, principal_portion, interest_portion, payment_date, note, " +
+  "transaction:transactions(id, kind, portfolio:portfolios(name))";
+
+/**
+ * `status` off a PostgREST row whose type the client could not infer. An
+ * `.update(patch)` where `patch` is a plain Record widens the following
+ * `.select()` to include a parse-error branch, so the row is not statically a
+ * debt — but it is one at runtime, and the status is worth having in the log.
+ */
+function statusOf(row: unknown): string | null {
+  return typeof row === "object" && row !== null && "status" in row
+    ? String((row as { status: unknown }).status)
+    : null;
+}
+
+const DEBT_KINDS = new Set(["payable", "receivable"]);
+// Mirrors public.debt_status. 'settled' and 'partially_paid' are derived by the
+// recompute trigger and are deliberately NOT settable through the PATCH route —
+// only the two states a person actually chooses are.
+const DEBT_STATUSES = new Set([
+  "open",
+  "partially_paid",
+  "settled",
+  "written_off",
+]);
+const USER_SETTABLE_DEBT_STATUSES = new Set(["open", "written_off"]);
+
+/** Debts a user owes / is owed, newest first. */
+app.get("/debts", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+  const q = req.query as {
+    kind?: string;
+    status?: string;
+    include_archived?: string;
+    limit?: string;
+  };
+  const limit = Math.min(Math.max(Number(q.limit) || 100, 1), 200);
+  const includeArchived = q.include_archived === "true";
+  const startedAt = process.hrtime.bigint();
+
+  let query = admin()
+    .from("debts")
+    .select(DEBT_SELECT)
+    .eq("user_id", userId) // service-role bypasses RLS — this is the boundary
+    .limit(limit);
+
+  if (!includeArchived) query = query.eq("is_archived", false);
+  if (q.kind && DEBT_KINDS.has(q.kind)) query = query.eq("kind", q.kind);
+  if (q.status && DEBT_STATUSES.has(q.status))
+    query = query.eq("status", q.status);
+
+  // Due-soonest first, undated last — the order a person chases debts in.
+  // nullsFirst:false is what pushes open-ended debts to the bottom.
+  const { data, error } = await query
+    .order("due_date", { ascending: true, nullsFirst: false })
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    req.log.error(
+      { userId, limit, dbMs: since(startedAt), ...dbErrorFields(error) },
+      "ledger.debts.list_failed",
+    );
+    return reply.code(500).send({ error: error.message });
+  }
+
+  req.log.debug(
+    { userId, limit, returned: data?.length ?? 0, dbMs: since(startedAt) },
+    "ledger.debts.list_ok",
+  );
+  return { debts: data ?? [] };
+});
+
+// Form options: active accounts (with balance + currency, so the form can warn
+// before the overdraft guard has to) and the currency list a debt can be in.
+app.get("/debts/options", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+  const startedAt = process.hrtime.bigint();
+
+  const [portfolios, currencies] = await Promise.all([
+    activePortfolios(userId),
+    admin()
+      .from("currencies")
+      .select("id, code, symbol, minor_unit")
+      .eq("is_active", true) // matches what the portfolios form offers
+      .order("code"),
+  ]);
+
+  if (portfolios.error || currencies.error) {
+    const error = portfolios.error ?? currencies.error;
+    req.log.error(
+      {
+        userId,
+        failed: portfolios.error ? "portfolios" : "currencies",
+        dbMs: since(startedAt),
+        ...dbErrorFields(error),
+      },
+      "ledger.debts.options_failed",
+    );
+    return reply.code(500).send({ error: error?.message });
+  }
+
+  req.log.debug(
+    {
+      userId,
+      portfolios: portfolios.data?.length ?? 0,
+      currencies: currencies.data?.length ?? 0,
+      dbMs: since(startedAt),
+    },
+    "ledger.debts.options_ok",
+  );
+
+  // Unlike expenses/transfers, zero accounts does NOT disable this form — a
+  // record-only debt needs no account at all. Only the disbursement picker and
+  // the payment form care.
+  return {
+    portfolios: portfolios.data ?? [],
+    currencies: currencies.data ?? [],
+  };
+});
+
+// One debt plus its payment history — backs the detail page.
+app.get("/debts/:id", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+  const { id } = req.params as { id: string };
+  if (!UUID_RE.test(id)) return reply.code(400).send({ error: "Invalid debt id." });
+  const startedAt = process.hrtime.bigint();
+
+  const [debt, payments] = await Promise.all([
+    admin()
+      .from("debts")
+      .select(DEBT_SELECT)
+      .eq("user_id", userId)
+      .eq("id", id)
+      .maybeSingle(),
+    admin()
+      .from("debt_payments")
+      .select(DEBT_PAYMENT_SELECT)
+      .eq("user_id", userId)
+      .eq("debt_id", id)
+      .order("payment_date", { ascending: false })
+      .order("created_at", { ascending: false }),
+  ]);
+
+  if (debt.error || payments.error) {
+    const error = debt.error ?? payments.error;
+    req.log.error(
+      {
+        userId,
+        debtId: id,
+        failed: debt.error ? "debt" : "payments",
+        dbMs: since(startedAt),
+        ...dbErrorFields(error),
+      },
+      "ledger.debts.get_failed",
+    );
+    return reply.code(500).send({ error: error?.message });
+  }
+
+  // maybeSingle + an explicit user_id filter: a debt belonging to someone else
+  // is indistinguishable from one that does not exist, which is the point.
+  if (!debt.data) {
+    req.log.warn({ userId, debtId: id }, "ledger.debts.get_not_found");
+    return reply.code(404).send({ error: "Debt not found." });
+  }
+
+  req.log.debug(
+    {
+      userId,
+      debtId: id,
+      payments: payments.data?.length ?? 0,
+      dbMs: since(startedAt),
+    },
+    "ledger.debts.get_ok",
+  );
+  return { debt: debt.data, payments: payments.data ?? [] };
+});
+
+// Record a debt, optionally posting the cash that changed hands (create_debt).
+app.post("/debts", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+
+  const b = (req.body ?? {}) as Record<string, unknown>;
+  const kind = String(b.kind ?? "");
+  const counterparty = String(b.counterparty ?? "").trim();
+  const principal = Number(b.principal_amount);
+  const currencyId = String(b.currency_id ?? "");
+  const interestRate =
+    b.interest_rate === undefined || b.interest_rate === null || b.interest_rate === ""
+      ? null
+      : Number(b.interest_rate);
+  const dueDate = b.due_date ? String(b.due_date) : null;
+  const note = b.note ? String(b.note) : null;
+  // Optional by design (decision D1): a debt that predates the app has no
+  // disbursement to post.
+  const disbursementPortfolio = b.disbursement_portfolio_id
+    ? String(b.disbursement_portfolio_id)
+    : null;
+  const disbursementDate = b.disbursement_date ? String(b.disbursement_date) : null;
+
+  // counterparty and note are the user's private data — presence only.
+  req.log.debug(
+    {
+      userId,
+      kind,
+      principal,
+      currencyId,
+      hasInterestRate: interestRate !== null,
+      dueDate,
+      hasNote: note !== null,
+      disburses: disbursementPortfolio !== null,
+    },
+    "ledger.debt.create_start",
+  );
+
+  const invalid = (field: string, message: string) => {
+    req.log.warn(
+      { userId, field, kind, principal, currencyId, dueDate },
+      "ledger.debt.create_invalid",
+    );
+    return reply.code(400).send({ error: message });
+  };
+
+  if (!DEBT_KINDS.has(kind))
+    return invalid("kind", "Choose whether you owe this or are owed it.");
+  if (!counterparty) return invalid("counterparty", "Who is this debt with?");
+  if (!Number.isFinite(principal) || principal <= 0)
+    return invalid("principal_amount", "Principal must be greater than zero.");
+  if (!UUID_RE.test(currencyId)) return invalid("currency_id", "Select a currency.");
+  if (interestRate !== null && (!Number.isFinite(interestRate) || interestRate < 0))
+    return invalid("interest_rate", "Interest rate cannot be negative.");
+  if (dueDate !== null && !/^\d{4}-\d{2}-\d{2}$/.test(dueDate))
+    return invalid("due_date", "Due date is not a valid date.");
+  if (disbursementPortfolio !== null && !UUID_RE.test(disbursementPortfolio))
+    return invalid("disbursement_portfolio_id", "Select a valid account.");
+  if (disbursementDate !== null && !/^\d{4}-\d{2}-\d{2}$/.test(disbursementDate))
+    return invalid("disbursement_date", "Disbursement date is not a valid date.");
+
+  const startedAt = process.hrtime.bigint();
+  const { data, error } = await admin().rpc("create_debt", {
+    _user_id: userId,
+    _kind: kind,
+    _counterparty: counterparty,
+    _principal: principal,
+    _currency_id: currencyId,
+    _interest_rate: interestRate,
+    _due_date: dueDate,
+    _note: note,
+    _disbursement_portfolio: disbursementPortfolio,
+    // The RPC defaults to current_date, but "today" there is the DB's timezone,
+    // not the user's — send the browser's date whenever we have it.
+    _disbursement_date: disbursementDate,
+  });
+
+  if (error) {
+    // Same split as the other create_* RPCs: P0001/P0002/23514 are guards doing
+    // their job (400); 42883/PGRST202 mean create_debt.sql was never applied or
+    // the schema cache is stale — a deploy problem, not a user one.
+    req.log.warn(
+      {
+        userId,
+        kind,
+        principal,
+        currencyId,
+        disburses: disbursementPortfolio !== null,
+        dbMs: since(startedAt),
+        ...dbErrorFields(error),
+      },
+      "ledger.debt.create_rejected",
+    );
+    return reply.code(400).send({ error: error.message });
+  }
+
+  const created = (data ?? {}) as { debt_id?: string; transaction_id?: string | null };
+
+  req.log.info(
+    {
+      userId,
+      debtId: created.debt_id,
+      // Null here means record-only — no money moved, which is a legitimate
+      // outcome and worth being able to tell apart from a failed disbursement.
+      transactionId: created.transaction_id ?? null,
+      kind,
+      principal,
+      currencyId,
+      dbMs: since(startedAt),
+    },
+    "ledger.debt.create_ok",
+  );
+  return reply.code(201).send({ debt: data });
+});
+
+// Edit a debt's descriptive fields. No hard DELETE route exists: debts cascade
+// to debt_payments, whose transaction_id is `on delete restrict` on the
+// transactions side — deleting a debt would drop its payment rows and orphan
+// ledger transactions that moved real money. Archive instead.
+app.patch("/debts/:id", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+  const { id } = req.params as { id: string };
+  if (!UUID_RE.test(id)) return reply.code(400).send({ error: "Invalid debt id." });
+
+  const b = (req.body ?? {}) as Record<string, unknown>;
+  const patch: Record<string, unknown> = {};
+
+  const invalid = (field: string, message: string) => {
+    req.log.warn({ userId, debtId: id, field }, "ledger.debt.update_invalid");
+    return reply.code(400).send({ error: message });
+  };
+
+  if (b.counterparty !== undefined) {
+    const counterparty = String(b.counterparty).trim();
+    if (!counterparty) return invalid("counterparty", "Who is this debt with?");
+    patch.counterparty = counterparty;
+  }
+  if (b.principal_amount !== undefined) {
+    const principal = Number(b.principal_amount);
+    if (!Number.isFinite(principal) || principal <= 0)
+      return invalid("principal_amount", "Principal must be greater than zero.");
+    // trg_debt_principal_recompute rewrites outstanding_balance and status from
+    // the payment history when this lands — see db/functions/debt_principal_recompute.sql.
+    patch.principal_amount = principal;
+  }
+  if (b.interest_rate !== undefined) {
+    const rate = b.interest_rate === null || b.interest_rate === "" ? null : Number(b.interest_rate);
+    if (rate !== null && (!Number.isFinite(rate) || rate < 0))
+      return invalid("interest_rate", "Interest rate cannot be negative.");
+    patch.interest_rate = rate;
+  }
+  if (b.due_date !== undefined) {
+    const dueDate = b.due_date === null || b.due_date === "" ? null : String(b.due_date);
+    if (dueDate !== null && !/^\d{4}-\d{2}-\d{2}$/.test(dueDate))
+      return invalid("due_date", "Due date is not a valid date.");
+    patch.due_date = dueDate;
+  }
+  if (b.note !== undefined) patch.note = b.note === null || b.note === "" ? null : String(b.note);
+  if (b.is_archived !== undefined) patch.is_archived = b.is_archived === true;
+  if (b.status !== undefined) {
+    const status = String(b.status);
+    // 'settled' and 'partially_paid' are the recompute trigger's to assign; a
+    // user setting them by hand would be overwritten by the next payment and
+    // would misreport the balance until then.
+    if (!USER_SETTABLE_DEBT_STATUSES.has(status))
+      return invalid("status", "A debt can only be reopened or written off by hand.");
+    patch.status = status;
+  }
+
+  if (Object.keys(patch).length === 0)
+    return invalid("body", "Nothing to update.");
+
+  const startedAt = process.hrtime.bigint();
+  const { data, error } = await admin()
+    .from("debts")
+    .update(patch)
+    .eq("user_id", userId)
+    .eq("id", id)
+    .select(DEBT_SELECT)
+    .maybeSingle();
+
+  if (error) {
+    req.log.warn(
+      {
+        userId,
+        debtId: id,
+        fields: Object.keys(patch),
+        dbMs: since(startedAt),
+        ...dbErrorFields(error),
+      },
+      "ledger.debt.update_rejected",
+    );
+    return reply.code(400).send({ error: error.message });
+  }
+  if (!data) {
+    req.log.warn({ userId, debtId: id }, "ledger.debt.update_not_found");
+    return reply.code(404).send({ error: "Debt not found." });
+  }
+
+  // Un-writing-off is the one status change we cannot take at face value.
+  // 'open' is what the caller asks for, but a debt with payments against it is
+  // really 'partially_paid' — and nothing would correct that until the next
+  // payment fired the recompute trigger. Derive it from the payment history now.
+  let debt = data;
+  if (patch.status === "open") {
+    const recomputed = await admin().rpc("recompute_debt", { _debt_id: id });
+    if (recomputed.error) {
+      // The debt IS reopened at this point; only the derived status may be
+      // stale, and the next payment fixes it. Worth a line, not a failure.
+      req.log.error(
+        { userId, debtId: id, ...dbErrorFields(recomputed.error) },
+        "ledger.debt.reopen_recompute_failed",
+      );
+    } else {
+      const fresh = await admin()
+        .from("debts")
+        .select(DEBT_SELECT)
+        .eq("user_id", userId)
+        .eq("id", id)
+        .maybeSingle();
+      if (fresh.data) debt = fresh.data;
+    }
+  }
+
+  req.log.info(
+    {
+      userId,
+      debtId: id,
+      fields: Object.keys(patch),
+      statusAfter: statusOf(debt),
+      dbMs: since(startedAt),
+    },
+    "ledger.debt.update_ok",
+  );
+  return { debt };
+});
+
+// Record a payment against a debt (create_debt_payment). Moves real cash AND
+// reduces the outstanding balance in one transaction.
+app.post("/debts/:id/payments", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+  const { id } = req.params as { id: string };
+  if (!UUID_RE.test(id)) return reply.code(400).send({ error: "Invalid debt id." });
+
+  const b = (req.body ?? {}) as Record<string, unknown>;
+  const amount = Number(b.amount);
+  // Blank interest means the whole payment is principal — the common case.
+  const interest =
+    b.interest_portion === undefined || b.interest_portion === null || b.interest_portion === ""
+      ? 0
+      : Number(b.interest_portion);
+  const portfolioId = String(b.portfolio_id ?? "");
+  const paymentDate = String(b.payment_date ?? "");
+  const note = b.note ? String(b.note) : null;
+
+  req.log.debug(
+    { userId, debtId: id, amount, interest, portfolioId, paymentDate, hasNote: note !== null },
+    "ledger.debt_payment.create_start",
+  );
+
+  const invalid = (field: string, message: string) => {
+    req.log.warn(
+      { userId, debtId: id, field, amount, interest, portfolioId, paymentDate },
+      "ledger.debt_payment.create_invalid",
+    );
+    return reply.code(400).send({ error: message });
+  };
+
+  if (!Number.isFinite(amount) || amount <= 0)
+    return invalid("amount", "Amount must be greater than zero.");
+  if (!Number.isFinite(interest) || interest < 0)
+    return invalid("interest_portion", "Interest cannot be negative.");
+  if (interest > amount)
+    return invalid("interest_portion", "Interest cannot be more than the payment.");
+  if (!UUID_RE.test(portfolioId)) return invalid("portfolio_id", "Select an account.");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(paymentDate))
+    return invalid("payment_date", "Date is required.");
+
+  const startedAt = process.hrtime.bigint();
+  const { data, error } = await admin().rpc("create_debt_payment", {
+    _user_id: userId,
+    _debt_id: id,
+    _portfolio_id: portfolioId,
+    _amount: amount,
+    // Derived rather than sent, so the DB's principal + interest = amount
+    // constraint cannot be tripped by a form that disagrees with itself.
+    _principal: amount - interest,
+    _interest: interest,
+    _payment_date: paymentDate,
+    _note: note,
+  });
+
+  if (error) {
+    // Overpayment, already-settled, archived, currency mismatch and insufficient
+    // funds all land here as P0001 raises — user-facing guards, hence 400.
+    req.log.warn(
+      {
+        userId,
+        debtId: id,
+        amount,
+        interest,
+        portfolioId,
+        paymentDate,
+        dbMs: since(startedAt),
+        ...dbErrorFields(error),
+      },
+      "ledger.debt_payment.create_rejected",
+    );
+    return reply.code(400).send({ error: error.message });
+  }
+
+  const created = (data ?? {}) as {
+    payment_id?: string;
+    transaction_id?: string;
+    outstanding_after?: string;
+    status_after?: string;
+  };
+
+  // outstanding_after/status_after are logged because "did this settle the
+  // debt?" is the question you ask when reading these lines back.
+  req.log.info(
+    {
+      userId,
+      debtId: id,
+      paymentId: created.payment_id,
+      transactionId: created.transaction_id,
+      amount,
+      interest,
+      portfolioId,
+      paymentDate,
+      outstandingAfter: created.outstanding_after,
+      statusAfter: created.status_after,
+      dbMs: since(startedAt),
+    },
+    "ledger.debt_payment.create_ok",
+  );
+  return reply.code(201).send({ payment: data });
+});
+
 installProcessLogging(app);
 
 app
