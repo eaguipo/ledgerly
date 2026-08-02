@@ -288,7 +288,9 @@ per feature and be consistent inside it — do not half-migrate a feature.
 
 ### 5.2 Add a page to the web app
 
-1. Create `apps/web/src/app/<feature>/page.tsx` as an **async Server Component**.
+1. Create `apps/web/src/app/(app)/<feature>/page.tsx` as an **async Server Component**. The
+   `(app)` route group supplies the signed-in shell (sidebar, mobile tab bar, theme toggle) and
+   does not affect the URL; `(auth)` is the equivalent group for `/login` and `/signup`.
 2. Authenticate at the top of the page — do not rely on the proxy alone:
    ```tsx
    const supabase = await createClient();
@@ -299,11 +301,18 @@ per feature and be consistent inside it — do not half-migrate a feature.
    protected page and every Server Action repeats it.
 3. Fetch data: either `supabase.from(...)` (RLS applies) or `gatewayFetch("/ledger/...")`.
 4. Put interactivity in a sibling `"use client"` component (`<feature>-form.tsx`) and pass plain
-   serializable props. Follow `expenses/expense-form.tsx`: `useActionState(action, initial)`,
+   serializable props. Follow `(app)/expenses/expense-form.tsx`: `useActionState(action, initial)`,
    `pending` for the disabled state, reset the form on success.
-5. Add a link from `dashboard/page.tsx` if it's a top-level destination.
-6. If the route must be public, add it to `isPublicPath()` in `src/lib/supabase/middleware.ts` —
-   otherwise unauthenticated users get bounced to `/login`.
+5. Build the UI from the shared primitives in `src/components/ui/` (`Button`, `Card`, `Field`,
+   `Input`, `Select`, `Table`, `Money`, `Alert`, `EmptyState`) and wrap the page in
+   `PageContainer` + `PageHeader`. Use the semantic tokens (`bg-surface`, `text-ink`,
+   `border-line`, `text-accent`) — **never** raw Tailwind palette colours such as `zinc-200`, and
+   never a `dark:` variant: the tokens flip themselves. See §5.9.
+6. Add the route to `NAV_ITEMS` in `src/components/shell/nav-items.tsx` if it's a top-level
+   destination — that feeds both the desktop sidebar and the mobile tab bar.
+7. If the route must be public, add it to `isPublicPath()` in `src/lib/supabase/middleware.ts` —
+   otherwise unauthenticated users get bounced to `/login`. A public route also belongs in the
+   `(auth)` group (or outside both groups), since `(app)/layout.tsx` redirects anonymous visitors.
 
 ### 5.3 Add a Server Action
 
@@ -504,6 +513,44 @@ Exception messages become the user-facing 400 text — write them for a person, 
   control is on ingress.
 - If you add a caller, add its label to the callee's `ingressFromPods` list, or its requests will
   silently time out.
+
+### 5.9 Change the look of the app
+
+The design language is dark-first and token-driven. There is no UI dependency — no component
+library, no icon package, no charting library.
+
+**Tokens.** `apps/web/src/app/globals.css` is the single source. Each token is a CSS variable
+declared twice — once under `:root` (light) and once under `.dark` — and exposed to Tailwind via
+`@theme inline`. The `inline` keyword is load-bearing: it makes the generated utility reference
+`var(--surface)` instead of copying the value, which is what lets the `.dark` block override it.
+
+The practical consequence: **components never write a `dark:` variant.** `bg-surface` is already
+correct in both themes. If you find yourself typing `dark:`, you are working against the system.
+
+| Token | Use for |
+|---|---|
+| `canvas` / `surface` / `raised` | page background · card background · insets and controls |
+| `line` / `line-strong` | hairline borders · hover and emphasis borders |
+| `ink` / `muted` / `faint` | primary text · secondary text · hints and disabled |
+| `accent` / `accent-hover` / `accent-ink` / `accent-soft` | brand green, its hover, text on top of it, and its tinted background |
+| `positive` / `negative` / `negative-soft` | inflows · outflows · error backgrounds |
+
+**Theme switching** is class-based, not `prefers-color-scheme`. An inline script in the root layout
+sets `.dark` on `<html>` before first paint, reading `localStorage["ledgerly-theme"]` and falling
+back to the OS. `ThemeToggle` reads that class through `useSyncExternalStore` rather than mirroring
+it into React state — do not "simplify" it into a `useEffect` + `setState`, which is a cascading
+render and fails lint.
+
+**Primitives** live in `src/components/ui/`. Add variants there rather than passing long
+`className` overrides from a page; the point is that a button can't drift between routes.
+
+**Charts** (`src/components/charts/`) are hand-written SVG. Two rules worth keeping:
+- Single-series marks use one hue. Identity comes from direct labels, not colour.
+- Never invent data. The dashboard trend reconstructs real history from
+  `transactions.signed_amount`; if a number can't be derived, show fewer numbers.
+
+**The brand mark** is `src/components/brand/logo.tsx`, and `src/app/icon.svg` is the favicon.
+They are separate files with the same geometry — change both together.
 
 ---
 
@@ -711,9 +758,14 @@ Things a maintainer should know are unfinished, roughly in order of how likely t
    is no request-id deduplication.
 10. **Rate limiting is per-token, in-memory, per-pod.** It doesn't survive a restart or coordinate
     across replicas.
-11. **`apps/web/src/app/layout.tsx` still carries the create-next-app metadata** ("Create Next App").
-12. **`apps/web/README.md` is the untouched create-next-app boilerplate** and contradicts the real
+11. **`apps/web/README.md` is the untouched create-next-app boilerplate** and contradicts the real
     setup — use the docs in `docs/` instead.
+12. **No FX rates anywhere.** Balances are per-currency and never converted, so the dashboard hero
+    reports a single currency and lists the others separately. A combined net-worth figure needs a
+    rates table first.
+13. **An alpha modifier on a theme token silently loses its alpha.** `bg-canvas/95` compiles to
+    plain `var(--canvas)` because the token is var-backed, so `backdrop-blur` behind it does
+    nothing. Use a solid token, or write an explicit `color-mix()`.
 13. **Phases C–E are unstarted**: portfolio/debt/goal/currency services, NATS event bus, reporting
     and notification workers, HPA tuning, observability, CI.
 

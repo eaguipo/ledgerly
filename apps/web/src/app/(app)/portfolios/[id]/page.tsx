@@ -1,8 +1,13 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
+import type { Metadata } from "next";
 import { createClient } from "@/lib/supabase/server";
 import { PortfolioForm } from "../portfolio-form";
 import { updatePortfolio } from "../actions";
+import { PageContainer } from "@/components/shell/page-header";
+import { Card, CardBody, CardHeader } from "@/components/ui/card";
+
+export const metadata: Metadata = { title: "Edit account" };
 
 export default async function EditPortfolioPage({
   params,
@@ -33,28 +38,33 @@ export default async function EditPortfolioPage({
   if (!portfolio) redirect("/portfolios");
 
   return (
-    <main className="mx-auto w-full max-w-xl flex-1 px-4 py-10">
-      <div className="mb-8 flex items-center justify-between">
-        <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
-          Edit account
-        </h1>
+    <PageContainer>
+      <nav className="mb-4">
         <Link
           href="/portfolios"
-          className="text-sm text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
+          className="text-[13px] text-muted transition-colors hover:text-ink"
         >
           ← Portfolios
         </Link>
-      </div>
+      </nav>
 
-      <section className="rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
-        <PortfolioForm
-          mode="edit"
-          action={updatePortfolio}
-          currencies={currencies ?? []}
-          portfolio={portfolio}
-          submitLabel="Save changes"
-        />
-      </section>
-    </main>
+      <div className="max-w-xl">
+        <Card>
+          <CardHeader
+            title="Edit account"
+            description={portfolio.name}
+          />
+          <CardBody>
+            <PortfolioForm
+              mode="edit"
+              action={updatePortfolio}
+              currencies={currencies ?? []}
+              portfolio={portfolio}
+              submitLabel="Save changes"
+            />
+          </CardBody>
+        </Card>
+      </div>
+    </PageContainer>
   );
 }
