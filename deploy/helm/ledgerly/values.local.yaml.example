@@ -1,0 +1,14 @@
+# Copy to `values.local.yaml` (gitignored) and fill in your Supabase project
+# creds, then deploy with:
+#
+#   helm upgrade --install ledgerly deploy/helm/ledgerly \
+#     -n ledgerly --create-namespace \
+#     -f deploy/helm/ledgerly/values.local.yaml
+#
+# (If you use Tilt, you can skip this file — Tilt reads apps/web/.env.local.)
+web:
+  env:
+    NEXT_PUBLIC_SUPABASE_URL: "https://YOUR-PROJECT-REF.supabase.co"
+    NEXT_PUBLIC_SUPABASE_ANON_KEY: "your-anon-key"
+  secretEnv:
+    SUPABASE_SERVICE_ROLE_KEY: "your-service-role-key"

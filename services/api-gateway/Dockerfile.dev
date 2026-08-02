@@ -1,0 +1,10 @@
+# syntax=docker/dockerfile:1
+# ── api-gateway — dev image (tsx watch, used by Tilt live_update) ─────────────
+FROM node:20-alpine
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY . .
+ENV NODE_ENV=development PORT=8080
+EXPOSE 8080
+CMD ["npm", "run", "dev"]

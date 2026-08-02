@@ -1,0 +1,21 @@
+# syntax=docker/dockerfile:1
+
+# ── Ledgerly web — DEVELOPMENT image (used by Tilt live_update) ───────────────
+# Runs `next dev` so we get HMR. Tilt syncs ./src into the container and
+# restarts on dependency changes, so we do NOT bake source here.
+FROM node:20-alpine
+RUN apk add --no-cache libc6-compat
+WORKDIR /app
+
+# Install deps first for layer caching; source is synced in by Tilt at runtime.
+COPY package.json package-lock.json ./
+RUN npm ci
+
+# Bring in the initial source (Tilt live_update keeps it in sync afterwards).
+COPY . .
+
+ENV NEXT_TELEMETRY_DISABLED=1 \
+    PORT=3000 \
+    HOSTNAME=0.0.0.0
+EXPOSE 3000
+CMD ["npm", "run", "dev"]

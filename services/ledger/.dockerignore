@@ -1,0 +1,9 @@
+node_modules
+dist
+.git
+Dockerfile
+Dockerfile.dev
+.dockerignore
+npm-debug.log*
+.DS_Store
+*.tsbuildinfo

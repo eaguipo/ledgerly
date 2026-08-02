@@ -25,15 +25,33 @@ at zero cost.
 ```
 personal-finance-tracker/
 ├── README.md                 ← you are here
+├── apps/
+│   └── web/                  ← Next.js 16 frontend / BFF (formerly finance-app/)
+├── services/                 ← backend microservices (Phase B onward)
+├── deploy/
+│   ├── k3d/                  ← local Kubernetes cluster definition
+│   └── helm/                 ← reusable service chart + ledgerly umbrella chart
+├── Tiltfile                  ← live-reload dev loop
+├── Makefile                  ← `make` for cluster/dev/deploy workflow
 ├── db/
 │   ├── schema.sql            ← tables, enums, functions, triggers, reporting views
 │   ├── policies.sql          ← Row Level Security policies + grants (run AFTER schema)
 │   └── seed.sql              ← default expense categories, purpose tags, currencies
 └── docs/
+    ├── DEVELOPER-GUIDE.md    ← build, run & test the system (start here)
+    ├── MAINTENANCE.md        ← architecture, change recipes, debugging playbooks
+    ├── INFRA.md              ← Docker/Kubernetes local mesh — architecture + runbook
     ├── DATABASE.md           ← design decisions + requirement-coverage matrix
     ├── ROADMAP.md            ← phased build plan (MVP → full app) + first setup steps
     └── DECISIONS-NEEDED.md   ← open questions that need your answer before going further
 ```
+
+## Two ways to run
+
+| Path | How | When |
+|------|-----|------|
+| **Vercel + managed Supabase** | push `main`, Vercel auto-deploys | shipping to real users (recommended) |
+| **Local Kubernetes mesh** | `make cluster-up && make dev` on the `infra/*` branch | learning Docker/K8s/microservices — see [docs/INFRA.md](docs/INFRA.md) |
 
 The database schema was designed directly from the business requirements doc and put through
 an **adversarial review pass**: every one of the 20 business requirements and 21 business rules
