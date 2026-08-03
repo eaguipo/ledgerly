@@ -333,11 +333,38 @@ back-filling an older date is a legitimate thing to do and produces a confusing 
 the row saves, and the headline figure correctly does not move. The form says so rather than
 looking broken.
 
-**PR 4b — Multi-currency polish** (§8) — independent of 4a; could land first if you want a quick
-win. Closes the `/portfolios` sort bug.
+**PR 4b — Multi-currency polish** (§8) ✅ *built 2026-08-03*
+1. ✅ `/portfolios` splits into one table per currency once more than one is held, each with its own
+   subtotal. Sorting still applies **within** a group, so "balance descending" is still descending —
+   it just no longer interleaves pesos with dollars.
+2. ✅ Audited every other summing surface. `/debts`, `/goals` and `/investments` already grouped;
+   `/expenses`, `/income` and `/transfers` carry no totals at all; the only remaining cross-currency
+   sums were on the dashboard, which is 4c.
 
-**PR 4c — Dashboard liquid/invested split** (§7). Depends on 4a for the invested figure. Touches
-numbers people have already looked at, so it wants its own diff and its own before/after check.
+One thing the plan did not anticipate: **group order cannot be by total.** Ranking the currency
+sections by size would compare a peso total against a dollar one — the exact comparison the change
+exists to remove — so groups order by the profile's default currency first, then alphabetically.
+That also makes the order stable when a sort header is clicked.
+
+**PR 4c — Dashboard liquid/invested split** (§7) ✅ *built 2026-08-03*
+1. ✅ `is_liquid` added to the query; the per-currency bucket now carries `liquid`, `parked` and
+   `total` separately.
+2. ✅ The hero is **Liquid**, not "Net worth" — the old figure summed cash, crypto wallets and
+   investment accounts into one number and omitted the `investments` table entirely.
+3. ✅ A "Beyond spendable cash" card carries other accounts, invested value and unrealised gain, in
+   the primary currency, explicitly never added to the headline.
+4. ✅ "Other currencies" now leads with each currency's liquid figure and says what sits beyond it.
+
+Three consequences worth knowing, none of them obvious from the plan:
+
+- **The trend chart had to follow the headline.** It walks `transactions` backwards from the current
+  figure, so with a liquid-only hero it must also be liquid-only — otherwise a transfer from savings
+  into a crypto wallet nets to zero across the pair and draws a flat line under a headline that just
+  dropped. `buildTrend` now takes the set of accounts it is allowed to count.
+- **`TrendChart`'s screen-reader label was hardcoded to "Net worth trend"** and is now a prop. An
+  announcement of "net worth" over a liquid-only series is a plain misstatement.
+- **Currencies held only as investments** had no account bucket and would have vanished from the
+  page entirely. They now appear in "Other currencies" labelled as such.
 
 ---
 
