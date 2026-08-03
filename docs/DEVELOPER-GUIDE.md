@@ -74,7 +74,7 @@ Supabase SQL Editor → New query → paste and run each file, one at a time:
 1. db/schema.sql              tables, enums, functions, triggers, reporting views
 2. db/policies.sql            Row Level Security policies + grants
 3. db/seed.sql                currencies, feature catalog, per-user default back-fills
-4. db/functions/*.sql         the RPCs ledger-service calls — every file, in any order:
+4. db/functions/  the service-role RPCs. These are independent of each other:
      create_expense.sql             expenses
      create_income.sql              income (also widens income_source: gains, gift)
      create_transfer.sql            transfers (service-role sibling of do_transfer)
@@ -86,21 +86,35 @@ Supabase SQL Editor → New query → paste and run each file, one at a time:
                                     v_investment_performance to expose it
      record_investment_snapshot.sql valuations: upsert-per-day, no future dates,
                                     currency taken from the parent holding
-     money_invested.sql             AFTER create_investment.sql — buying an
-                                    investment posts a real outflow; adds
-                                    expenses.investment_id and excludes asset
-                                    purchases from both report views
      debt_principal_recompute.sql   keeps outstanding_balance right when a principal is edited
-5. db/functions/custom_option_labels.sql   LAST — user-supplied options: adds
-     portfolios.category_label / incomes.source_label and re-creates
-     create_expense / create_income / do_expense / do_income with one more
-     parameter each. Must run after the four functions it replaces.
+
+5. db/functions/  these have ORDER DEPENDENCIES — run them in this sequence,
+   after everything in step 4:
+     cashflow_excludes_debt_origination.sql  needs create_debt.sql (references the
+                                    loan_received enum value it adds). Keeps
+                                    borrowing/lending out of the report views.
+     money_invested.sql             needs create_investment.sql (replaces it).
+                                    Buying an investment posts a real outflow;
+                                    adds expenses.investment_id and re-creates
+                                    both report views to exclude asset purchases.
+     authenticated_entry_points.sql needs EVERY create_*.sql — it wraps them all
+                                    as the do_* functions the Vercel deploy writes
+                                    through.
+     custom_option_labels.sql       LAST. Adds portfolios.category_label /
+                                    incomes.source_label and re-creates
+                                    create_expense / create_income / do_expense /
+                                    do_income with one more parameter each, so
+                                    anything run after it puts the old signatures
+                                    back.
 ```
 
 Order matters for 1–3: `policies.sql` references objects created in `schema.sql`, and `seed.sql`
-must run before the first signup so `handle_new_user()` can resolve the default PHP currency. The
-step-4 `db/functions/` files are independent of each other; `custom_option_labels.sql` is not —
-it redefines functions the others create, so it goes last.
+must run before the first signup so `handle_new_user()` can resolve the default PHP currency.
+
+Step 4's files are genuinely independent. Step 5's are not, and each says why. Note that
+`cashflow_excludes_debt_origination.sql` and `money_invested.sql` define the **same two views**, as
+does `schema.sql` §19 — all three copies are byte-identical on purpose, so getting those two in the
+wrong order cannot silently revert an exclusion.
 
 Step 4 is easy to forget — without it the matching feature fails with a PostgREST "function not
 found" error (PGRST202/42883), which reads like a bug in the app rather than a missing migration.
