@@ -86,6 +86,8 @@ personal-finance-tracker/
     ├── create_debt_payment.sql    service-role sibling of do_debt_payment(), plus overpayment guards
     ├── debt_principal_recompute.sql  recompute_debt() helper + the debts-side trigger
     ├── cashflow_excludes_debt_origination.sql  keeps borrowing/lending out of inflow-outflow
+    ├── v_income_by_source.sql     income-side counterpart to v_expense_by_category;
+    │                              drops loan_received so the two agree on a month
     ├── create_goal.sql            goal + linked-account currency check (no money moves)
     ├── create_goal_contribution.sql  earmark/withdraw, plus the over-withdrawal guard
     ├── create_investment.sql      holding + funding-account currency check (no money
@@ -93,6 +95,9 @@ personal-finance-tracker/
     │                              v_investment_performance to select it
     ├── record_investment_snapshot.sql  valuation upsert; rejects future dates and
     │                              derives currency from the parent holding
+    ├── money_invested.sql         buying an investment posts a real outflow; adds
+    │                              expenses.investment_id and re-creates both report
+    │                              views to exclude asset purchases
     ├── authenticated_entry_points.sql  do_income/do_expense/do_debt/do_goal/
     │                                   do_goal_contribution/do_investment/
     │                                   do_investment_snapshot — the RLS-path wrappers
@@ -235,11 +240,16 @@ Key mechanics:
   guards overpayment.** `apply_goal_contribution()` sets `current_amount = greatest(sum(amount), 0)`,
   so taking back more than is set aside clamps the cached total at zero while the underlying sum
   goes negative — and every later contribution is then measured from a phantom deficit.
-- **Investments move no money either** (Phase 4, decision D1). Recording a holding is a statement
-  about what you own and a snapshot is an observation of what it is worth; neither posts a ledger
-  row, and `investments.portfolio_id` is a "funded from" note rather than a movement — which is why
-  the table has no `transaction_id` at all. Buying something is an Expense or a Transfer you record
-  separately, and gains stay unrealised until you sell.
+- **Buying an investment moves money; valuing one does not.** `investments.portfolio_id` is the
+  account that *paid*, and setting it posts a real outflow against a self-healing `Money Invested`
+  category (`db/functions/money_invested.sql`). Leaving it blank is record-only, for a holding that
+  predates the app — the same optional shape as a debt's disbursement. Snapshots move nothing: a
+  valuation is an observation, and gains stay unrealised until you sell. **Selling is not modelled.**
+- **`expenses.investment_id` marks an asset purchase, and both report views exclude it.** Buying gold
+  is not consumption, exactly as lending is not spending — `v_cashflow` and `v_expense_by_category`
+  filter it out alongside `debt_id`. Three files carry those two view definitions (`schema.sql` §19,
+  `cashflow_excludes_debt_origination.sql`, `money_invested.sql`) and **all three are byte-identical
+  on purpose**, so the order they are applied in cannot matter.
 - **`investments.current_value` belongs to the snapshot trigger, not to callers.**
   `sync_investment_current_value()` copies the market value of the snapshot with the NEWEST
   `as_of_date` onto it, so a value written any other way silently reverts on the next valuation. The

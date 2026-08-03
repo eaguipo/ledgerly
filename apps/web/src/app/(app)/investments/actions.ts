@@ -18,16 +18,20 @@ import {
 } from "./constants";
 
 /**
- * Investment Server Actions. Nothing here moves money (Phase 4, decision D1):
- * recording a holding is a statement about what you own, and a snapshot is an
- * observation of what it is worth. No ledger row is posted and no portfolio
- * balance changes — which is why none of these revalidate /portfolios.
+ * Investment Server Actions.
  *
- * They still go through ledgerFetch rather than writing the tables directly,
- * because create_investment / record_investment_snapshot hold validation the UI
- * must not be the only place enforcing: the funding account's currency, and the
- * future-date and wrong-currency guards that stop one bad valuation pinning
- * current_value permanently.
+ * Creating a holding CAN move money, as of db/functions/money_invested.sql: a
+ * paying account posts a real outflow against a self-healing 'Money Invested'
+ * category, and both report views exclude it so buying an asset never reads as
+ * spending. Leaving the account blank keeps the Phase 4 behaviour — record-only,
+ * for something you already owned. Valuations still move nothing: a snapshot is
+ * an observation, and gains stay unrealised until you sell.
+ *
+ * They go through ledgerFetch rather than writing the tables directly because
+ * create_investment / record_investment_snapshot hold validation the UI must not
+ * be the only place enforcing: the paying account's currency and overdraft
+ * guard, and the future-date and wrong-currency guards that stop one bad
+ * valuation pinning current_value permanently.
  */
 
 export type InvestmentFormState =
@@ -198,10 +202,17 @@ export async function createInvestment(
     durationMs: elapsed(),
   });
 
-  // No balance moved, so /portfolios is untouched by design. The dashboard
-  // carries the invested total, so it is stale either way.
+  // A paying account means real money left it, so far more is stale than when
+  // investments were record-only: the account balance, the expenses list (the
+  // purchase posts an expense row under 'Money Invested'), and the dashboard's
+  // liquid figure. Revalidating only /investments here was correct before this
+  // change and is wrong after it.
   revalidatePath("/investments");
   revalidatePath("/dashboard");
+  if (portfolioId) {
+    revalidatePath("/portfolios");
+    revalidatePath("/expenses");
+  }
 
   return {
     status: "success",

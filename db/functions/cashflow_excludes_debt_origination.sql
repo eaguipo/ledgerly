@@ -25,8 +25,14 @@
 -- Debt *payments* remain counted. Servicing a debt is real cash leaving the
 -- account, and Rule 14 makes that ledger row the single source of truth for it.
 --
+-- The same two views also carry the asset-purchase exclusion added by
+-- money_invested.sql (`expenses.investment_id`), so that all THREE copies —
+-- here, schema.sql §19, and money_invested.sql — are identical and the apply
+-- order between them cannot matter. Without that, running this file after
+-- money_invested.sql would silently revert the investment exclusion.
+--
 -- Mirrored into db/schema.sql §19 so a fresh install produces the same views.
--- Keep the two in sync.
+-- Keep all three in sync.
 -- ============================================================================
 
 create or replace view public.v_cashflow
@@ -37,12 +43,14 @@ create or replace view public.v_cashflow
     and not exists (select 1 from public.incomes i
                      where i.transaction_id = t.id and i.source = 'loan_received')
     and not exists (select 1 from public.expenses e
-                     where e.transaction_id = t.id and e.debt_id is not null)
+                     where e.transaction_id = t.id
+                       and (e.debt_id is not null or e.investment_id is not null))
   group by t.user_id, c.code, t.txn_date, t.direction;
 
 -- `debt_id is null` is safe as the marker because Rule 14 / DECISIONS-NEEDED #3
 -- make the debt payment its own ledger kind — a debt-linked EXPENSE only ever
--- comes from create_debt()'s lending leg.
+-- comes from create_debt()'s lending leg. `investment_id is null` is safe for the
+-- same reason: its only writer is create_investment()'s purchase leg.
 create or replace view public.v_expense_by_category
   with (security_invoker = true) as
   select e.user_id, ec.id as category_id, ec.name as category_name, t.txn_date,
@@ -51,7 +59,7 @@ create or replace view public.v_expense_by_category
   join public.transactions t on t.id = e.transaction_id and t.is_void = false
   join public.expense_categories ec on ec.id = e.category_id
   join public.currencies c on c.id = t.currency_id
-  where e.debt_id is null
+  where e.debt_id is null and e.investment_id is null
   group by e.user_id, ec.id, ec.name, t.txn_date, c.code;
 
 notify pgrst, 'reload schema';

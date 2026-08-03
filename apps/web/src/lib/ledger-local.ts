@@ -415,9 +415,11 @@ export async function localLedger(
   }
 
   // ---- investments -------------------------------------------------------
-  // Nothing here moves money (Phase 4 decision D1) — an investment is a
-  // statement about what you hold and a snapshot is an observation of what it is
-  // worth, so no ledger row is posted on either path.
+  // Creating a holding CAN move money as of db/functions/money_invested.sql: a
+  // paying account posts a real outflow, excluded from both report views so
+  // buying an asset never reads as spending. Blank account = record-only, for
+  // something you already owned. Snapshots still move nothing — a valuation is
+  // an observation, and gains stay unrealised until you sell.
   if (route === "/investments" && method === "GET") {
     let q = sb.from("investments").select(INVESTMENT_SELECT);
     if (url.searchParams.get("include_inactive") !== "true") {

@@ -69,12 +69,13 @@ function InvestmentFields({
   const [accountId, setAccountId] = useState("");
 
   const currency = currencies.find((c) => c.id === currencyId);
-  // create_investment rejects a funding account in a different currency: the
-  // link exists to say where the money came from, and that is meaningless if
-  // the account holds a different currency from the holding.
+  // create_investment rejects a paying account in a different currency —
+  // trg_txn_currency (BR17) requires a transaction to match its account, and
+  // this now posts a real transaction.
   const eligible = accounts.filter(
     (a) => one(a.currency)?.code === currency?.code,
   );
+  const selectedAccount = eligible.find((a) => a.id === accountId);
 
   return (
     <form action={action} className="space-y-4">
@@ -180,14 +181,20 @@ function InvestmentFields({
         </Field>
       </div>
 
+      {/* Naming this "Paid from" rather than "Funded from" is the whole point:
+          picking an account now MOVES REAL MONEY out of it, dated the opened-on
+          date above. Leaving it blank is how you record something you already
+          owned — same rule as a debt that predates the app. */}
       <Field
-        label="Funded from"
+        label="Paid from"
         htmlFor="portfolio_id"
         optional
         hint={
           eligible.length === 0
-            ? `You have no ${currency?.code ?? ""} account to link this to.`
-            : "A record of where the money came from. No money moves — log the actual payment as an expense or transfer."
+            ? `You have no ${currency?.code ?? ""} account to pay from.`
+            : selectedAccount
+              ? `The amount invested comes out of ${selectedAccount.name}, dated the opened-on date. It won't count as spending.`
+              : "Money leaves the account you pick. Leave blank for something you already owned."
         }
       >
         <Select
@@ -197,7 +204,7 @@ function InvestmentFields({
           disabled={eligible.length === 0}
           onChange={(e) => setAccountId(e.target.value)}
         >
-          <option value="">No account</option>
+          <option value="">Don&apos;t record a payment</option>
           {eligible.map((a) => (
             <option key={a.id} value={a.id}>
               {a.name} — {formatMoney(a.current_balance, one(a.currency))}
@@ -205,6 +212,12 @@ function InvestmentFields({
           ))}
         </Select>
       </Field>
+
+      {/* No client-side overdraft pre-check: the options payload carries no
+          `allow_negative`, so a balance comparison here would wrongly warn on
+          accounts that are allowed to go negative. create_investment holds the
+          row under FOR UPDATE and returns a message naming the account and the
+          shortfall — that error surfaces in the Alert below. */}
 
       {/* Both mounted always, filled conditionally — a live region created at
           the same moment it gains text is usually not announced. */}
