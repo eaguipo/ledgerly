@@ -187,9 +187,6 @@ export async function localLedger(
   }
 
   if (route === "/transfers" && method === "POST") {
-    // do_transfer predates the create_* split and returns the transfer uuid
-    // rather than a jsonb summary, so the response is assembled here to match
-    // what the ledger route sends back.
     const { data, error } = await sb.rpc("do_transfer", {
       _from_portfolio: body.from_portfolio_id,
       _to_portfolio: body.to_portfolio_id,
@@ -199,26 +196,7 @@ export async function localLedger(
       _txn_date: body.txn_date,
       _note: body.note ?? null,
     });
-    if (error) return done(dbFail(error));
-    const { data: row } = await sb
-      .from("transfers")
-      .select("id, amount_received, out_transaction_id, in_transaction_id, fee_transaction_id")
-      .eq("id", data)
-      .maybeSingle();
-    return done(
-      json(
-        {
-          transfer: {
-            transfer_id: data,
-            out_transaction_id: row?.out_transaction_id ?? null,
-            in_transaction_id: row?.in_transaction_id ?? null,
-            fee_transaction_id: row?.fee_transaction_id ?? null,
-            amount_received: row?.amount_received ?? null,
-          },
-        },
-        201,
-      ),
-    );
+    return done(error ? dbFail(error) : json({ transfer: data }, 201));
   }
 
   // ---- debts -------------------------------------------------------------
@@ -303,12 +281,22 @@ export async function localLedger(
 
   if (paymentsFor && method === "POST") {
     if (!UUID_RE.test(paymentsFor)) return done(json({ error: "Invalid debt id." }, 400));
+    // The form sends `interest_portion`, and the principal is DERIVED from it
+    // rather than sent — same as the ledger route — so a form that disagrees
+    // with itself cannot trip the DB's principal + interest = amount constraint.
+    const amount = Number(body.amount);
+    const interest =
+      body.interest_portion === undefined ||
+      body.interest_portion === null ||
+      body.interest_portion === ""
+        ? 0
+        : Number(body.interest_portion);
     const { data, error } = await sb.rpc("do_debt_payment", {
       _debt_id: paymentsFor,
       _portfolio_id: body.portfolio_id,
-      _amount: body.amount,
-      _principal: body.principal ?? null,
-      _interest: body.interest ?? 0,
+      _amount: amount,
+      _principal: amount - interest,
+      _interest: interest,
       _payment_date: body.payment_date,
       _note: body.note ?? null,
     });

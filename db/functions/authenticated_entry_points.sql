@@ -24,10 +24,17 @@
 -- supplied by the caller. Keep it that way — the moment one of these grows a
 -- _user_id parameter it becomes a cross-tenant write primitive.
 --
--- do_transfer() and do_debt_payment() already exist as full RLS-path copies in
--- schema.sql §16/§16b, so they are not re-declared here. They duplicate their
--- create_* siblings rather than delegating; converting them to wrappers would
--- remove that drift risk and is worth doing separately.
+-- do_transfer() and do_debt_payment() already existed as full RLS-path COPIES of
+-- the logic (schema.sql §16/§16b). They are replaced below by wrappers of the
+-- same shape as the rest, because copies drift and this one already had:
+-- create_debt_payment() rejects overpayment, settled and archived debts, and
+-- returns the post-payment state; do_debt_payment() does none of that. Leaving
+-- it in place meant the Vercel deploy silently ran weaker guards than the mesh
+-- and reported the wrong outstanding balance back to the form.
+--
+-- They are DROPped first because a wrapper returns jsonb where the originals
+-- returned uuid, and CREATE OR REPLACE cannot change a return type. Nothing else
+-- calls them — they have been dead code since the microservice split.
 -- ============================================================================
 
 create or replace function public.do_income(
@@ -89,6 +96,55 @@ begin
     v_uid, _kind, _counterparty, _principal, _currency_id,
     _interest_rate, _due_date, _note, _disbursement_portfolio, _disbursement_date);
 end $$;
+
+-- Replacing the two legacy copies. Same names and argument lists so any existing
+-- caller keeps compiling; the body now delegates and the return type becomes the
+-- same jsonb summary the create_* functions produce.
+drop function if exists public.do_transfer(uuid, uuid, numeric, numeric, numeric, date, text);
+create or replace function public.do_transfer(
+  _from_portfolio uuid,
+  _to_portfolio   uuid,
+  _amount         numeric,
+  _fee            numeric default 0,
+  _exchange_rate  numeric default 1,
+  _txn_date       date    default current_date,
+  _note           text    default null
+) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare v_uid uuid := auth.uid();
+begin
+  if v_uid is null then
+    raise exception 'Not authenticated' using errcode = '28000';
+  end if;
+  return public.create_transfer(
+    v_uid, _from_portfolio, _to_portfolio, _amount, _fee, _exchange_rate, _txn_date, _note);
+end $$;
+
+drop function if exists public.do_debt_payment(uuid, uuid, numeric, numeric, numeric, date, text);
+create or replace function public.do_debt_payment(
+  _debt_id      uuid,
+  _portfolio_id uuid,
+  _amount       numeric,
+  _principal    numeric default null,
+  _interest     numeric default 0,
+  _payment_date date    default current_date,
+  _note         text    default null
+) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare v_uid uuid := auth.uid();
+begin
+  if v_uid is null then
+    raise exception 'Not authenticated' using errcode = '28000';
+  end if;
+  return public.create_debt_payment(
+    v_uid, _debt_id, _portfolio_id, _amount, _principal, _interest, _payment_date, _note);
+end $$;
+
+revoke all on function public.do_transfer(uuid, uuid, numeric, numeric, numeric, date, text) from public;
+grant execute on function public.do_transfer(uuid, uuid, numeric, numeric, numeric, date, text) to authenticated;
+
+revoke all on function public.do_debt_payment(uuid, uuid, numeric, numeric, numeric, date, text) from public;
+grant execute on function public.do_debt_payment(uuid, uuid, numeric, numeric, numeric, date, text) to authenticated;
 
 revoke all on function public.do_income(uuid, numeric, public.income_source, date, text, text, boolean) from public;
 grant execute on function public.do_income(uuid, numeric, public.income_source, date, text, text, boolean) to authenticated;
