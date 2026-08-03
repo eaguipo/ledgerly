@@ -5,6 +5,8 @@ import { PORTFOLIO_CATEGORIES } from "./constants";
 import type { PortfolioFormState } from "./actions";
 import { Button } from "@/components/ui/button";
 import { Checkbox, Field, Input, Select } from "@/components/ui/field";
+import { ChoiceWithCustom } from "@/components/ui/choice-with-custom";
+import { CUSTOM_CHOICE } from "@/lib/custom-choice";
 import { Alert } from "@/components/ui/feedback";
 
 interface Currency {
@@ -18,6 +20,7 @@ interface PortfolioInput {
   id: string;
   name: string;
   category: string;
+  category_label: string | null;
   currency_id: string;
   is_savings: boolean;
   institution: string | null;
@@ -36,6 +39,8 @@ interface FormProps {
   mode: "create" | "edit";
   portfolio?: PortfolioInput;
   defaultCurrencyId?: string;
+  /** Category names this user has already invented, offered as autocomplete. */
+  customCategories?: string[];
   submitLabel: string;
 }
 
@@ -61,6 +66,7 @@ function PortfolioFields({
   mode,
   portfolio,
   defaultCurrencyId,
+  customCategories = [],
   submitLabel,
   state,
   formAction,
@@ -73,6 +79,10 @@ function PortfolioFields({
   const currentCurrency = currencies.find(
     (c) => c.id === portfolio?.currency_id,
   );
+
+  // An account already carrying its own name reopens on the custom entry with
+  // that name filled in, not on a plain "Others" that would erase it on save.
+  const hasCustomCategory = Boolean(portfolio?.category_label);
 
   return (
     <form action={formAction} className="space-y-4">
@@ -91,20 +101,32 @@ function PortfolioFields({
         />
       </Field>
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <Field label="Category" htmlFor="category">
-          <Select
-            id="category"
+      <div className="grid grid-cols-1 items-start gap-4 sm:grid-cols-2">
+        {/* Wrapped: ChoiceWithCustom emits two fields, and without this the
+            revealed name box would become the grid cell next to Currency. */}
+        <div className="space-y-4">
+          <ChoiceWithCustom
+            label="Category"
             name="category"
-            defaultValue={portfolio?.category ?? "cash"}
-          >
-            {PORTFOLIO_CATEGORIES.map((c) => (
-              <option key={c.value} value={c.value}>
-                {c.label}
-              </option>
-            ))}
-          </Select>
-        </Field>
+            defaultValue={
+              hasCustomCategory
+                ? CUSTOM_CHOICE
+                : (portfolio?.category ?? "cash")
+            }
+            options={PORTFOLIO_CATEGORIES.map((c) => ({
+              value: c.value,
+              label: c.label,
+            }))}
+            addLabel="+ Name my own category…"
+            custom={{
+              name: "category_label",
+              label: "Category name",
+              placeholder: "e.g. Gold bullion",
+              defaultValue: portfolio?.category_label ?? undefined,
+              suggestions: customCategories,
+            }}
+          />
+        </div>
 
         <Field label="Currency" htmlFor="currency_id">
           {mode === "create" ? (

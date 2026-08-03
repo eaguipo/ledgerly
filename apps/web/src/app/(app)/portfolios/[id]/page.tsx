@@ -6,6 +6,7 @@ import { dbError, startTimer } from "@/lib/logger";
 import { requestLogger } from "@/lib/request-context";
 import { PortfolioForm } from "../portfolio-form";
 import { updatePortfolio } from "../actions";
+import { distinctLabels } from "@/lib/custom-choice";
 import { PageContainer } from "@/components/shell/page-header";
 import { Card, CardBody, CardHeader } from "@/components/ui/card";
 
@@ -35,10 +36,11 @@ export default async function EditPortfolioPage({
   const [
     { data: portfolio, error: portfolioError },
     { data: currencies, error: currenciesError },
+    { data: labelRows },
   ] = await Promise.all([
     supabase
       .from("portfolios")
-      .select("id, name, category, currency_id, is_savings, institution")
+      .select("id, name, category, category_label, currency_id, is_savings, institution")
       .eq("id", id)
       .single(), // RLS scopes this to the owner; others get no row.
     supabase
@@ -46,6 +48,13 @@ export default async function EditPortfolioPage({
       .select("id, code, symbol, name, minor_unit")
       .eq("is_active", true)
       .order("code"),
+    // Category names this user has invented elsewhere, so re-categorising an
+    // account can reuse one instead of spawning a near-duplicate spelling.
+    // A failure here only costs autocomplete, so it is not surfaced.
+    supabase
+      .from("portfolios")
+      .select("category_label")
+      .not("category_label", "is", null),
   ]);
 
   if (currenciesError) {
@@ -92,6 +101,9 @@ export default async function EditPortfolioPage({
               action={updatePortfolio}
               currencies={currencies ?? []}
               portfolio={portfolio}
+              customCategories={distinctLabels(
+                (labelRows ?? []).map((r) => r.category_label),
+              )}
               submitLabel="Save changes"
             />
           </CardBody>

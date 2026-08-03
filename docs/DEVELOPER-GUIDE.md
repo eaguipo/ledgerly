@@ -83,11 +83,16 @@ Supabase SQL Editor → New query → paste and run each file, one at a time:
      create_goal.sql                goals (validates the linked account's currency)
      create_goal_contribution.sql   goal earmarks + the over-withdrawal guard
      debt_principal_recompute.sql   keeps outstanding_balance right when a principal is edited
+5. db/functions/custom_option_labels.sql   LAST — user-supplied options: adds
+     portfolios.category_label / incomes.source_label and re-creates
+     create_expense / create_income / do_expense / do_income with one more
+     parameter each. Must run after the four functions it replaces.
 ```
 
 Order matters for 1–3: `policies.sql` references objects created in `schema.sql`, and `seed.sql`
 must run before the first signup so `handle_new_user()` can resolve the default PHP currency. The
-`db/functions/` files are independent of each other.
+step-4 `db/functions/` files are independent of each other; `custom_option_labels.sql` is not —
+it redefines functions the others create, so it goes last.
 
 Step 4 is easy to forget — without it the matching feature fails with a PostgREST "function not
 found" error (PGRST202/42883), which reads like a bug in the app rather than a missing migration.
