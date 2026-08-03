@@ -103,12 +103,19 @@ Supabase SQL Editor → New query → paste and run each file, one at a time:
      authenticated_entry_points.sql needs EVERY create_*.sql — it wraps them all
                                     as the do_* functions the Vercel deploy writes
                                     through.
-     custom_option_labels.sql       LAST. Adds portfolios.category_label /
+     custom_option_labels.sql       Adds portfolios.category_label /
                                     incomes.source_label and re-creates
                                     create_expense / create_income / do_expense /
                                     do_income with one more parameter each, so
-                                    anything run after it puts the old signatures
-                                    back.
+                                    any of THOSE FOUR run after it puts the old
+                                    signatures back.
+     edit_and_delete_entries.sql    LAST. Editing and deleting an expense, an
+                                    income entry or an investment: update_* /
+                                    delete_* plus their do_* wrappers. Needs
+                                    incomes.source_label (custom_option_labels)
+                                    and expenses.investment_id (money_invested),
+                                    and re-creates nothing — so unlike the file
+                                    above, running things after it is harmless.
 ```
 
 Order matters for 1–3: `policies.sql` references objects created in `schema.sql`, and `seed.sql`

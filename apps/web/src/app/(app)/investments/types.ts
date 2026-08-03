@@ -35,9 +35,28 @@ export interface InvestmentRow {
   maturity_date: string | null;
   is_active: boolean;
   portfolio_id: string | null;
+  /** Fixed after creation — the purchase leg has to match the account's currency. */
+  currency_id: string;
   created_at: string;
   currency: Currency | Currency[] | null;
   portfolio: FundingPortfolio | FundingPortfolio[] | null;
+}
+
+/**
+ * The ledger row that PAID for a holding, when there is one.
+ *
+ * Distinct from `InvestmentRow.portfolio_id`: a holding recorded before
+ * money_invested.sql carries an account that was never anything but a label, and
+ * only the presence of this row says whether editing the cost basis will move a
+ * balance. Null means record-only.
+ */
+export interface PurchaseLeg {
+  transaction_id: string;
+  transaction: {
+    amount: number | string;
+    txn_date: string;
+    portfolio_id: string;
+  } | null;
 }
 
 /** One valuation. `market_value` is what the sync trigger reads. */

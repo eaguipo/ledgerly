@@ -1,7 +1,7 @@
 "use client";
 
 import { useActionState } from "react";
-import { createExpense, type ExpenseFormState } from "./actions";
+import type { ExpenseFormState } from "./actions";
 import { Button } from "@/components/ui/button";
 import { Field, Input, Select } from "@/components/ui/field";
 import { ChoiceWithCustom } from "@/components/ui/choice-with-custom";
@@ -17,6 +17,22 @@ interface Portfolio {
   name: string;
 }
 
+/** The subset of an expense the edit form fills itself in from. */
+export interface ExpenseInput {
+  id: string;
+  amount: string;
+  txn_date: string;
+  portfolio_id: string;
+  category_id: string;
+  merchant: string | null;
+  description: string | null;
+}
+
+type Action = (
+  state: ExpenseFormState,
+  formData: FormData,
+) => Promise<ExpenseFormState>;
+
 const initial: ExpenseFormState = { status: "idle" };
 
 function todayIso() {
@@ -24,25 +40,30 @@ function todayIso() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-export function ExpenseForm({
-  categories,
-  portfolios,
-}: {
+interface FormProps {
+  action: Action;
   categories: Category[];
   portfolios: Portfolio[];
-}) {
-  const [state, action, pending] = useActionState(createExpense, initial);
+  mode: "create" | "edit";
+  expense?: ExpenseInput;
+  submitLabel: string;
+}
+
+export function ExpenseForm(props: FormProps) {
+  const [state, action, pending] = useActionState(props.action, initial);
 
   // Clearing the form is a remount keyed on the new expense's id, matching
   // /income and /portfolios. It used to be formRef.current.reset(), which only
   // resets DOM inputs — the category picker now holds React state ("am I
   // showing the new-category box?"), and reset() would leave that stranded
   // open above a select that had snapped back to "Select category…".
+  //
+  // In edit mode the key never changes: updateExpense redirects to the list
+  // rather than returning a success state, so there is nothing to clear.
   return (
     <ExpenseFields
       key={state.status === "success" ? state.expenseId : "entry"}
-      categories={categories}
-      portfolios={portfolios}
+      {...props}
       action={action}
       pending={pending}
       state={state}
@@ -53,18 +74,23 @@ export function ExpenseForm({
 function ExpenseFields({
   categories,
   portfolios,
+  mode,
+  expense,
+  submitLabel,
   action,
   pending,
   state,
-}: {
-  categories: Category[];
-  portfolios: Portfolio[];
+}: Omit<FormProps, "action"> & {
   action: (formData: FormData) => void;
   pending: boolean;
   state: ExpenseFormState;
 }) {
+  const editing = mode === "edit" && expense !== undefined;
+
   return (
     <form action={action} className="space-y-4">
+      {editing ? <input type="hidden" name="id" value={expense.id} /> : null}
+
       <div className="grid grid-cols-2 gap-4">
         <Field label="Amount" htmlFor="amount">
           <Input
@@ -74,6 +100,7 @@ function ExpenseFields({
             step="any"
             min="0.01"
             required
+            defaultValue={expense?.amount}
             placeholder="0.00"
           />
         </Field>
@@ -83,14 +110,30 @@ function ExpenseFields({
             id="txn_date"
             name="txn_date"
             type="date"
-            defaultValue={todayIso()}
+            defaultValue={expense?.txn_date ?? todayIso()}
             required
           />
         </Field>
       </div>
 
-      <Field label="Account" htmlFor="portfolio_id">
-        <Select id="portfolio_id" name="portfolio_id" required defaultValue="">
+      <Field
+        label="Account"
+        htmlFor="portfolio_id"
+        hint={
+          // Moving an expense between accounts is allowed, and it moves the
+          // money with it — worth saying, because nothing else on this form
+          // implies a second balance changes.
+          editing
+            ? "Changing this moves the expense to the other account's balance."
+            : undefined
+        }
+      >
+        <Select
+          id="portfolio_id"
+          name="portfolio_id"
+          required
+          defaultValue={expense?.portfolio_id ?? ""}
+        >
           <option value="">Select account…</option>
           {portfolios.map((p) => (
             <option key={p.id} value={p.id}>
@@ -108,6 +151,7 @@ function ExpenseFields({
         name="category_id"
         required
         placeholder="Select category…"
+        defaultValue={expense?.category_id ?? ""}
         options={categories.map((c) => ({ value: c.id, label: c.name }))}
         addLabel="+ Add a new category…"
         custom={{
@@ -123,6 +167,7 @@ function ExpenseFields({
           id="merchant"
           name="merchant"
           type="text"
+          defaultValue={expense?.merchant ?? ""}
           placeholder="Where did you spend?"
         />
       </Field>
@@ -132,6 +177,7 @@ function ExpenseFields({
           id="description"
           name="description"
           type="text"
+          defaultValue={expense?.description ?? ""}
           placeholder="Add a note…"
         />
       </Field>
@@ -147,7 +193,7 @@ function ExpenseFields({
       </Alert>
 
       <Button type="submit" disabled={pending} className="w-full">
-        {pending ? "Saving…" : "Add expense"}
+        {pending ? "Saving…" : submitLabel}
       </Button>
     </form>
   );

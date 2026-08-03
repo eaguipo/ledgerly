@@ -94,10 +94,23 @@ function userIdOf(req: FastifyRequest, reply: FastifyReply): string | null {
 // `transactions` (plain transaction_id + the composite (transaction_id,txn_kind)),
 // so PostgREST needs the FK name to disambiguate the embed. transaction_id is
 // NOT NULL, so this is effectively an inner join.
+// investment_id / debt_id are selected for the list's benefit, not to be shown:
+// a row carrying either is another feature's ledger leg, and the list uses them
+// to withhold its Edit and Delete affordances rather than offering an action the
+// RPC will refuse.
 const EXPENSE_SELECT =
-  "id, merchant, category:expense_categories(name), " +
+  "id, merchant, investment_id, debt_id, category:expense_categories(name), " +
   "transaction:transactions!expenses_txn_kind_fk(id, amount, txn_date, description, " +
   "currency:currencies(code, symbol, minor_unit), portfolio:portfolios(name))";
+
+// What an EDIT form needs, as opposed to what the list renders: raw ids instead
+// of display names, plus the two columns that say whether this row is another
+// feature's ledger leg (create_debt's lending leg, create_investment's purchase)
+// and therefore belongs to that page rather than /expenses.
+const EXPENSE_EDIT_SELECT =
+  "id, merchant, category_id, investment_id, debt_id, " +
+  "transaction:transactions!expenses_txn_kind_fk(" +
+  "id, amount, txn_date, description, portfolio_id)";
 
 app.get("/healthz", async () => ({ status: "ok" }));
 
@@ -324,12 +337,213 @@ app.post("/expenses", async (req, reply) => {
   return reply.code(201).send({ expense: data });
 });
 
+/** One expense in the shape its edit form needs. */
+app.get("/expenses/:id", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+  const { id } = req.params as { id: string };
+  if (!UUID_RE.test(id))
+    return reply.code(400).send({ error: "Invalid expense id." });
+  const startedAt = process.hrtime.bigint();
+
+  const { data, error } = await admin()
+    .from("expenses")
+    .select(EXPENSE_EDIT_SELECT)
+    .eq("user_id", userId)
+    .eq("id", id)
+    .maybeSingle();
+
+  if (error) {
+    req.log.error(
+      { userId, expenseId: id, dbMs: since(startedAt), ...dbErrorFields(error) },
+      "ledger.expenses.get_failed",
+    );
+    return reply.code(500).send({ error: error.message });
+  }
+  // Someone else's expense is indistinguishable from one that does not exist.
+  if (!data) {
+    req.log.warn({ userId, expenseId: id }, "ledger.expenses.get_not_found");
+    return reply.code(404).send({ error: "Expense not found." });
+  }
+
+  req.log.debug(
+    { userId, expenseId: id, dbMs: since(startedAt) },
+    "ledger.expenses.get_ok",
+  );
+  return { expense: data };
+});
+
+/**
+ * Correct an expense you already recorded.
+ *
+ * The ledger row is APPEND-ONLY and trg_txn_immutable rejects any change to its
+ * amount, date or account — so update_expense() replaces the row rather than
+ * mutating it (void → insert → repoint → delete, all in one DB transaction).
+ * See db/functions/edit_and_delete_entries.sql for why the order matters.
+ *
+ * Validation is deliberately thin here: the fields are optional by design, and
+ * every money rule (ownership, the account's currency, the overdraft guard, the
+ * find-or-create category) lives in the RPC so both transports enforce it
+ * identically. What is checked here is only what turns a 500 into a 400.
+ */
+app.patch("/expenses/:id", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+  const { id } = req.params as { id: string };
+  if (!UUID_RE.test(id))
+    return reply.code(400).send({ error: "Invalid expense id." });
+
+  const b = (req.body ?? {}) as Record<string, unknown>;
+  const patch: Record<string, unknown> = {};
+
+  const invalid = (field: string, message: string) => {
+    req.log.warn({ userId, expenseId: id, field }, "ledger.expense.update_invalid");
+    return reply.code(400).send({ error: message });
+  };
+
+  if (b.amount !== undefined) {
+    const amount = Number(b.amount);
+    if (!Number.isFinite(amount) || amount <= 0)
+      return invalid("amount", "Amount must be greater than zero.");
+    patch.amount = amount;
+  }
+  if (b.portfolio_id !== undefined) {
+    const portfolioId = String(b.portfolio_id ?? "");
+    if (!UUID_RE.test(portfolioId)) return invalid("portfolio_id", "Select an account.");
+    patch.portfolio_id = portfolioId;
+  }
+  if (b.txn_date !== undefined) {
+    const txnDate = String(b.txn_date ?? "");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(txnDate))
+      return invalid("txn_date", "Date is required.");
+    patch.txn_date = txnDate;
+  }
+  // An existing category always wins over a typed one — the same precedence
+  // create_expense() and update_expense() both apply.
+  if (b.category_id !== undefined && UUID_RE.test(String(b.category_id ?? ""))) {
+    patch.category_id = String(b.category_id);
+  } else if (b.new_category !== undefined) {
+    const newCategory = String(b.new_category ?? "").trim();
+    if (!newCategory) return invalid("category_id", "Select a category.");
+    if (newCategory.length > MAX_CUSTOM_LABEL)
+      return invalid(
+        "new_category",
+        `Category name must be ${MAX_CUSTOM_LABEL} characters or fewer.`,
+      );
+    patch.new_category = newCategory;
+  }
+  // Passed through as null rather than dropped: null CLEARS the field, absent
+  // leaves it alone, and the RPC distinguishes the two with `_patch ? 'x'`.
+  if (b.description !== undefined) patch.description = b.description ?? null;
+  if (b.merchant !== undefined) patch.merchant = b.merchant ?? null;
+
+  if (Object.keys(patch).length === 0) return invalid("body", "Nothing to update.");
+
+  const startedAt = process.hrtime.bigint();
+  const { data, error } = await admin().rpc("update_expense", {
+    _user_id: userId,
+    _expense_id: id,
+    _patch: patch,
+  });
+
+  if (error) {
+    // P0002 covers both "not yours" and "does not exist" — indistinguishable on
+    // purpose. The refusals for a debt- or investment-linked row are P0001.
+    req.log.warn(
+      {
+        userId,
+        expenseId: id,
+        fields: Object.keys(patch),
+        dbMs: since(startedAt),
+        ...dbErrorFields(error),
+      },
+      "ledger.expense.update_rejected",
+    );
+    return reply.code(400).send({ error: error.message });
+  }
+
+  const updated = (data ?? {}) as {
+    transaction_id?: string;
+    ledger_replaced?: boolean;
+  };
+  req.log.info(
+    {
+      userId,
+      expenseId: id,
+      fields: Object.keys(patch),
+      transactionId: updated.transaction_id,
+      // True means the old ledger row was replaced and a balance moved; false
+      // means this was a note/category edit and nothing financial changed.
+      ledgerReplaced: updated.ledger_replaced ?? false,
+      dbMs: since(startedAt),
+    },
+    "ledger.expense.update_ok",
+  );
+  return { expense: data };
+});
+
+/**
+ * Remove an expense entirely: the ledger row goes, its detail row cascades with
+ * it, and trg_txn_balance credits the account back. audit_log keeps the deleted
+ * row (trg_audit_transactions), which is what makes this acceptable rather than
+ * leaving a voided row behind for every list and view to filter.
+ */
+app.delete("/expenses/:id", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+  const { id } = req.params as { id: string };
+  if (!UUID_RE.test(id))
+    return reply.code(400).send({ error: "Invalid expense id." });
+
+  const startedAt = process.hrtime.bigint();
+  const { data, error } = await admin().rpc("delete_expense", {
+    _user_id: userId,
+    _expense_id: id,
+  });
+
+  if (error) {
+    req.log.warn(
+      { userId, expenseId: id, dbMs: since(startedAt), ...dbErrorFields(error) },
+      "ledger.expense.delete_rejected",
+    );
+    return reply.code(400).send({ error: error.message });
+  }
+
+  const removed = (data ?? {}) as {
+    transaction_id?: string;
+    portfolio_id?: string;
+    amount?: string;
+  };
+  // Money leaving the ledger deserves the same weight as money entering it —
+  // this is the line that proves what was removed and from where.
+  req.log.info(
+    {
+      userId,
+      expenseId: id,
+      transactionId: removed.transaction_id,
+      portfolioId: removed.portfolio_id,
+      amount: removed.amount,
+      dbMs: since(startedAt),
+    },
+    "ledger.expense.delete_ok",
+  );
+  return { deleted: data };
+});
+
 // The income row shape the web app renders. `incomes` mirrors `expenses`: two
 // foreign keys to `transactions`, so the composite FK name disambiguates the embed.
 const INCOME_SELECT =
-  "id, source, source_name, source_label, is_recurring, " +
+  "id, source, source_name, source_label, is_recurring, debt_id, " +
   "transaction:transactions!incomes_txn_kind_fk(id, amount, txn_date, description, " +
   "currency:currencies(code, symbol, minor_unit), portfolio:portfolios(name))";
+
+// The edit-form counterpart to INCOME_SELECT — see EXPENSE_EDIT_SELECT. `debt_id`
+// is here for the same reason: a debt disbursement is an income row this page
+// must not edit.
+const INCOME_EDIT_SELECT =
+  "id, source, source_name, source_label, is_recurring, debt_id, " +
+  "transaction:transactions!incomes_txn_kind_fk(" +
+  "id, amount, txn_date, description, portfolio_id)";
 
 // `transfers` carries two FKs to portfolios and two to currencies; the !column
 // hints tell PostgREST which leg each embed belongs to. The three transaction
@@ -591,6 +805,184 @@ app.post("/incomes", async (req, reply) => {
     "ledger.income.create_ok",
   );
   return reply.code(201).send({ income: data });
+});
+
+/** One income entry in the shape its edit form needs. */
+app.get("/incomes/:id", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+  const { id } = req.params as { id: string };
+  if (!UUID_RE.test(id))
+    return reply.code(400).send({ error: "Invalid income id." });
+  const startedAt = process.hrtime.bigint();
+
+  const { data, error } = await admin()
+    .from("incomes")
+    .select(INCOME_EDIT_SELECT)
+    .eq("user_id", userId)
+    .eq("id", id)
+    .maybeSingle();
+
+  if (error) {
+    req.log.error(
+      { userId, incomeId: id, dbMs: since(startedAt), ...dbErrorFields(error) },
+      "ledger.incomes.get_failed",
+    );
+    return reply.code(500).send({ error: error.message });
+  }
+  if (!data) {
+    req.log.warn({ userId, incomeId: id }, "ledger.incomes.get_not_found");
+    return reply.code(404).send({ error: "Income entry not found." });
+  }
+
+  req.log.debug(
+    { userId, incomeId: id, dbMs: since(startedAt) },
+    "ledger.incomes.get_ok",
+  );
+  return { income: data };
+});
+
+/**
+ * Correct an income entry. Same replace-not-mutate mechanism as PATCH /expenses
+ * — see that route and db/functions/edit_and_delete_entries.sql.
+ *
+ * One asymmetry worth knowing: reducing or moving an INFLOW lowers a balance, so
+ * this can be refused for insufficient funds where an expense edit never would.
+ * The RPC pre-checks it so the message names the account and the shortfall.
+ */
+app.patch("/incomes/:id", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+  const { id } = req.params as { id: string };
+  if (!UUID_RE.test(id))
+    return reply.code(400).send({ error: "Invalid income id." });
+
+  const b = (req.body ?? {}) as Record<string, unknown>;
+  const patch: Record<string, unknown> = {};
+
+  const invalid = (field: string, message: string) => {
+    req.log.warn({ userId, incomeId: id, field }, "ledger.income.update_invalid");
+    return reply.code(400).send({ error: message });
+  };
+
+  if (b.amount !== undefined) {
+    const amount = Number(b.amount);
+    if (!Number.isFinite(amount) || amount <= 0)
+      return invalid("amount", "Amount must be greater than zero.");
+    patch.amount = amount;
+  }
+  if (b.portfolio_id !== undefined) {
+    const portfolioId = String(b.portfolio_id ?? "");
+    if (!UUID_RE.test(portfolioId)) return invalid("portfolio_id", "Select an account.");
+    patch.portfolio_id = portfolioId;
+  }
+  if (b.txn_date !== undefined) {
+    const txnDate = String(b.txn_date ?? "");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(txnDate))
+      return invalid("txn_date", "Date is required.");
+    patch.txn_date = txnDate;
+  }
+  if (b.source !== undefined) {
+    const source = String(b.source ?? "");
+    if (!INCOME_SOURCES.has(source))
+      return invalid("source", "Select where the money came from.");
+    patch.source = source;
+  }
+  if (b.source_label !== undefined) {
+    const label = b.source_label === null ? null : String(b.source_label).trim();
+    if (label !== null && label.length > MAX_CUSTOM_LABEL)
+      return invalid(
+        "source_label",
+        `Source name must be ${MAX_CUSTOM_LABEL} characters or fewer.`,
+      );
+    patch.source_label = label === "" ? null : label;
+  }
+  if (b.source_name !== undefined) patch.source_name = b.source_name ?? null;
+  if (b.description !== undefined) patch.description = b.description ?? null;
+  if (b.is_recurring !== undefined) patch.is_recurring = b.is_recurring === true;
+
+  if (Object.keys(patch).length === 0) return invalid("body", "Nothing to update.");
+
+  const startedAt = process.hrtime.bigint();
+  const { data, error } = await admin().rpc("update_income", {
+    _user_id: userId,
+    _income_id: id,
+    _patch: patch,
+  });
+
+  if (error) {
+    req.log.warn(
+      {
+        userId,
+        incomeId: id,
+        fields: Object.keys(patch),
+        dbMs: since(startedAt),
+        ...dbErrorFields(error),
+      },
+      "ledger.income.update_rejected",
+    );
+    return reply.code(400).send({ error: error.message });
+  }
+
+  const updated = (data ?? {}) as {
+    transaction_id?: string;
+    ledger_replaced?: boolean;
+  };
+  req.log.info(
+    {
+      userId,
+      incomeId: id,
+      fields: Object.keys(patch),
+      transactionId: updated.transaction_id,
+      ledgerReplaced: updated.ledger_replaced ?? false,
+      dbMs: since(startedAt),
+    },
+    "ledger.income.update_ok",
+  );
+  return { income: data };
+});
+
+/** Remove an income entry, taking the money back out of the account. */
+app.delete("/incomes/:id", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+  const { id } = req.params as { id: string };
+  if (!UUID_RE.test(id))
+    return reply.code(400).send({ error: "Invalid income id." });
+
+  const startedAt = process.hrtime.bigint();
+  const { data, error } = await admin().rpc("delete_income", {
+    _user_id: userId,
+    _income_id: id,
+  });
+
+  if (error) {
+    // The common 400 here is not "not found" but the overdraft pre-check: you
+    // cannot un-record money that has already been spent out of the account.
+    req.log.warn(
+      { userId, incomeId: id, dbMs: since(startedAt), ...dbErrorFields(error) },
+      "ledger.income.delete_rejected",
+    );
+    return reply.code(400).send({ error: error.message });
+  }
+
+  const removed = (data ?? {}) as {
+    transaction_id?: string;
+    portfolio_id?: string;
+    amount?: string;
+  };
+  req.log.info(
+    {
+      userId,
+      incomeId: id,
+      transactionId: removed.transaction_id,
+      portfolioId: removed.portfolio_id,
+      amount: removed.amount,
+      dbMs: since(startedAt),
+    },
+    "ledger.income.delete_ok",
+  );
+  return { deleted: data };
 });
 
 // Recent transfers for the current user.
@@ -1504,6 +1896,41 @@ app.post("/goals", async (req, reply) => {
   return reply.code(201).send({ goal: data });
 });
 
+/** One goal, for its edit form. */
+app.get("/goals/:id", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+  const { id } = req.params as { id: string };
+  if (!UUID_RE.test(id)) return reply.code(400).send({ error: "Invalid goal id." });
+  const startedAt = process.hrtime.bigint();
+
+  const { data, error } = await admin()
+    .from("goals")
+    .select(GOAL_SELECT)
+    .eq("user_id", userId)
+    .eq("id", id)
+    .maybeSingle();
+
+  if (error) {
+    req.log.error(
+      { userId, goalId: id, dbMs: since(startedAt), ...dbErrorFields(error) },
+      "ledger.goals.get_failed",
+    );
+    return reply.code(500).send({ error: error.message });
+  }
+  // Someone else's goal is indistinguishable from one that does not exist.
+  if (!data) {
+    req.log.warn({ userId, goalId: id }, "ledger.goals.get_not_found");
+    return reply.code(404).send({ error: "Goal not found." });
+  }
+
+  req.log.debug(
+    { userId, goalId: id, dbMs: since(startedAt) },
+    "ledger.goals.get_ok",
+  );
+  return { goal: data };
+});
+
 // Edit a goal's name, target, target date or status.
 //
 // linked_portfolio_id is deliberately NOT patchable: changing it has to re-check
@@ -1700,7 +2127,7 @@ app.post("/goals/:id/contributions", async (req, reply) => {
 const INVESTMENT_SELECT =
   "id, name, kind, kind_label, symbol, quantity, average_cost, invested_amount, " +
   "current_value, unrealized_gain, opened_on, maturity_date, is_active, " +
-  "portfolio_id, created_at, currency:currencies(code, symbol, minor_unit), " +
+  "portfolio_id, currency_id, created_at, currency:currencies(code, symbol, minor_unit), " +
   "portfolio:portfolios(name)";
 
 const SNAPSHOT_SELECT =
@@ -1818,7 +2245,7 @@ app.get("/investments/:id", async (req, reply) => {
     return reply.code(400).send({ error: "Invalid investment id." });
   const startedAt = process.hrtime.bigint();
 
-  const [investment, snapshots] = await Promise.all([
+  const [investment, snapshots, purchase] = await Promise.all([
     admin()
       .from("investments")
       .select(INVESTMENT_SELECT)
@@ -1833,6 +2260,18 @@ app.get("/investments/:id", async (req, reply) => {
       .order("as_of_date", { ascending: false })
       .order("created_at", { ascending: false })
       .limit(200),
+    // The purchase leg, if this holding posted one. `portfolio_id` on the
+    // investment is NOT the same question: holdings recorded before
+    // money_invested.sql carry an account that was only ever a label, and the
+    // difference decides both what the detail page can promise and whether
+    // editing the cost basis will move a balance.
+    admin()
+      .from("expenses")
+      .select("transaction_id, transaction:transactions(amount, txn_date, portfolio_id)")
+      .eq("user_id", userId)
+      .eq("investment_id", id)
+      .limit(1)
+      .maybeSingle(),
   ]);
 
   if (investment.error || snapshots.error) {
@@ -1861,11 +2300,19 @@ app.get("/investments/:id", async (req, reply) => {
       userId,
       investmentId: id,
       snapshots: snapshots.data?.length ?? 0,
+      // A failure on the purchase lookup is not worth a 500 — it only softens a
+      // sentence on the page — but it is worth saying it happened.
+      purchaseLookupFailed: Boolean(purchase.error),
+      hasPurchase: Boolean(purchase.data),
       dbMs: since(startedAt),
     },
     "ledger.investments.get_ok",
   );
-  return { investment: investment.data, snapshots: snapshots.data ?? [] };
+  return {
+    investment: investment.data,
+    snapshots: snapshots.data ?? [],
+    purchase: purchase.data ?? null,
+  };
 });
 
 // Record a holding via the create_investment RPC.
@@ -1994,12 +2441,20 @@ app.post("/investments", async (req, reply) => {
   return reply.code(201).send({ investment: data });
 });
 
-// Edit a holding's descriptive fields, its cost basis, or close it.
+// Edit a holding's descriptive fields, its cost basis, its funding, or close it.
 //
 // current_value is deliberately NOT patchable: it is owned by
 // sync_investment_current_value() from the first snapshot onward, so a value set
 // here would silently revert on the next valuation. Post a snapshot instead.
 // unrealized_gain is a generated column and cannot be written at all.
+//
+// This goes through update_investment() rather than writing the table, and that
+// is the point of the RPC existing: a holding bought from an account has a real
+// ledger row behind it (money_invested.sql), and a direct
+// `update investments set invested_amount = …` left that row untouched — so
+// correcting 50,000 to 60,000 left the paying account 10,000 too high. The RPC
+// rebuilds the purchase leg whenever the patch touches portfolio_id,
+// invested_amount or opened_on, and leaves it strictly alone otherwise.
 app.patch("/investments/:id", async (req, reply) => {
   const userId = userIdOf(req, reply);
   if (!userId) return reply;
@@ -2070,6 +2525,16 @@ app.patch("/investments/:id", async (req, reply) => {
       return invalid("maturity_date", "Maturity date is not a valid date.");
     patch.maturity_date = maturity;
   }
+  // opened_on doubles as the purchase date, so sending it re-dates the ledger
+  // row as well as the holding — which is why it is in the RPC's cash-touching
+  // set rather than treated as another descriptive field.
+  if (b.opened_on !== undefined) {
+    const openedOn =
+      b.opened_on === null || b.opened_on === "" ? null : String(b.opened_on);
+    if (openedOn !== null && !/^\d{4}-\d{2}-\d{2}$/.test(openedOn))
+      return invalid("opened_on", "Opened date is not a valid date.");
+    patch.opened_on = openedOn;
+  }
   if (b.portfolio_id !== undefined) {
     const portfolioId =
       b.portfolio_id === null || b.portfolio_id === "" ? null : String(b.portfolio_id);
@@ -2082,13 +2547,11 @@ app.patch("/investments/:id", async (req, reply) => {
   if (Object.keys(patch).length === 0) return invalid("body", "Nothing to update.");
 
   const startedAt = process.hrtime.bigint();
-  const { data, error } = await admin()
-    .from("investments")
-    .update(patch)
-    .eq("user_id", userId)
-    .eq("id", id)
-    .select(INVESTMENT_SELECT)
-    .maybeSingle();
+  const { data, error } = await admin().rpc("update_investment", {
+    _user_id: userId,
+    _investment_id: id,
+    _patch: patch,
+  });
 
   if (error) {
     req.log.warn(
@@ -2103,7 +2566,17 @@ app.patch("/investments/:id", async (req, reply) => {
     );
     return reply.code(400).send({ error: error.message });
   }
-  if (!data) {
+
+  // The RPC returns a summary, not the row — re-read it so this route keeps
+  // answering with the same shape the detail page and ledger-local expect.
+  const fresh = await admin()
+    .from("investments")
+    .select(INVESTMENT_SELECT)
+    .eq("user_id", userId)
+    .eq("id", id)
+    .maybeSingle();
+
+  if (!fresh.data) {
     req.log.warn({ userId, investmentId: id }, "ledger.investment.update_not_found");
     return reply.code(404).send({ error: "Investment not found." });
   }
@@ -2113,20 +2586,76 @@ app.patch("/investments/:id", async (req, reply) => {
       userId,
       investmentId: id,
       fields: Object.keys(patch),
+      // True when the purchase leg was rebuilt, i.e. an account balance moved.
+      // A descriptive edit or a close/reopen leaves this false.
+      cashMoved: (data as { cash_moved?: boolean } | null)?.cash_moved ?? false,
       dbMs: since(startedAt),
     },
     "ledger.investment.update_ok",
   );
-  return { investment: data };
+  return { investment: fresh.data };
+});
+
+/**
+ * Delete a holding outright, along with its valuation history AND the purchase
+ * that paid for it.
+ *
+ * Taking the purchase with it is not incidental. expenses.investment_id is
+ * `on delete set null`, and v_cashflow / v_expense_by_category exclude asset
+ * purchases by exactly that column — so a leg left behind would turn into an
+ * ordinary expense and start reading as spending the moment the holding
+ * disappeared. Deleting means "this never happened", and the cash comes back.
+ *
+ * Closing (is_active = false) remains the reversible option and is still what
+ * the UI offers first; this is for a holding recorded by mistake.
+ */
+app.delete("/investments/:id", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+  const { id } = req.params as { id: string };
+  if (!UUID_RE.test(id))
+    return reply.code(400).send({ error: "Invalid investment id." });
+
+  const startedAt = process.hrtime.bigint();
+  const { data, error } = await admin().rpc("delete_investment", {
+    _user_id: userId,
+    _investment_id: id,
+  });
+
+  if (error) {
+    req.log.warn(
+      { userId, investmentId: id, dbMs: since(startedAt), ...dbErrorFields(error) },
+      "ledger.investment.delete_rejected",
+    );
+    return reply.code(400).send({ error: error.message });
+  }
+
+  const removed = (data ?? {}) as {
+    snapshots_deleted?: number;
+    purchases_reversed?: number;
+  };
+  // Both counts are the irreversible part — say what was actually thrown away.
+  req.log.info(
+    {
+      userId,
+      investmentId: id,
+      snapshotsDeleted: removed.snapshots_deleted ?? 0,
+      purchasesReversed: removed.purchases_reversed ?? 0,
+      dbMs: since(startedAt),
+    },
+    "ledger.investment.delete_ok",
+  );
+  return { deleted: data };
 });
 
 // Record what a holding is worth today (record_investment_snapshot).
 //
-// No DELETE route for investments, and none for snapshots either. investments →
-// investment_snapshots is `on delete cascade`, so deleting a holding throws away
-// the valuation history that is the entire record of how it performed. Closing
-// it (is_active = false) is the same archive-not-delete rule debts and goals
-// already follow.
+// No DELETE route for an individual snapshot. investments → investment_snapshots
+// is `on delete cascade`, so the valuation history goes only when the holding
+// itself does (DELETE /investments/:id above), and closing it (is_active = false)
+// remains the reversible option — the same archive-not-delete rule debts and
+// goals follow. Correcting a single valuation is a re-post: the RPC upserts per
+// day, so recording the same as_of_date again overwrites it.
 app.post("/investments/:id/snapshots", async (req, reply) => {
   const userId = userIdOf(req, reply);
   if (!userId) return reply;

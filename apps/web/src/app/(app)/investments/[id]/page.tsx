@@ -16,9 +16,9 @@ import {
   returnPct,
   todayIso,
 } from "../constants";
-import type { InvestmentRow, SnapshotRow } from "../types";
+import type { InvestmentRow, PurchaseLeg, SnapshotRow } from "../types";
 import { PageContainer } from "@/components/shell/page-header";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonLink } from "@/components/ui/button";
 import { Card, CardBody, CardHeader, Eyebrow } from "@/components/ui/card";
 import { Table, Th, Tr, Td } from "@/components/ui/table";
 import { Alert, Badge, EmptyState } from "@/components/ui/feedback";
@@ -87,9 +87,13 @@ export default async function InvestmentDetailPage({
   const detail = (await detailRes.json()) as {
     investment: InvestmentRow;
     snapshots?: SnapshotRow[];
+    purchase?: PurchaseLeg | null;
   };
   const investment = detail.investment;
   const snapshots = detail.snapshots ?? [];
+  // Whether a real outflow was posted for this holding, which is NOT the same as
+  // it naming an account — see PurchaseLeg.
+  const hasPurchase = Boolean(detail.purchase);
 
   const currency = one(investment.currency);
   const funding = one(investment.portfolio);
@@ -231,13 +235,16 @@ export default async function InvestmentDetailPage({
 
               {funding ? (
                 <p className="text-xs text-faint">
-                  Paid from {funding.name}. Holdings recorded before this was
-                  supported may show an account here without a matching payment —
-                  the link was informational then.
+                  {hasPurchase
+                    ? `Paid from ${funding.name} — a real outflow, excluded from spending reports because buying an asset isn't consumption.`
+                    : `${funding.name} is recorded as the source, but no payment was posted: this holding predates that being supported, so the link is informational.`}
                 </p>
               ) : null}
 
-              <div className="flex flex-wrap gap-2 border-t border-line pt-4">
+              <div className="flex flex-wrap items-center gap-2 border-t border-line pt-4">
+                <ButtonLink href={`/investments/${investment.id}/edit`} size="sm">
+                  Edit
+                </ButtonLink>
                 {investment.is_active ? (
                   <ActionButton
                     id={investment.id}
@@ -251,6 +258,9 @@ export default async function InvestmentDetailPage({
                     label="Reopen"
                   />
                 )}
+                {/* Deleting lives on the edit page, not here: it takes the
+                    valuation history and the purchase with it, and that needs
+                    more room to say than a button in a row. */}
               </div>
             </CardBody>
           </Card>
