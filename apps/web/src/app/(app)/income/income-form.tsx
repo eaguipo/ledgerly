@@ -1,18 +1,41 @@
 "use client";
 
 import { useActionState, useState } from "react";
-import { createIncome, type IncomeFormState } from "./actions";
+import type { IncomeFormState } from "./actions";
 import Link from "next/link";
-import { PICKABLE_INCOME_SOURCES, sourceNamePlaceholder } from "./constants";
+import {
+  CUSTOM_INCOME_SOURCE,
+  PICKABLE_INCOME_SOURCES,
+  sourceNamePlaceholder,
+} from "./constants";
 import { Button } from "@/components/ui/button";
 import { Checkbox, Field, Input, Select } from "@/components/ui/field";
 import { ChoiceWithCustom } from "@/components/ui/choice-with-custom";
+import { CUSTOM_CHOICE } from "@/lib/custom-choice";
 import { Alert } from "@/components/ui/feedback";
 
 interface Portfolio {
   id: string;
   name: string;
 }
+
+/** The subset of an income entry the edit form fills itself in from. */
+export interface IncomeInput {
+  id: string;
+  amount: string;
+  txn_date: string;
+  portfolio_id: string;
+  source: string;
+  source_label: string | null;
+  source_name: string | null;
+  description: string | null;
+  is_recurring: boolean;
+}
+
+type Action = (
+  state: IncomeFormState,
+  formData: FormData,
+) => Promise<IncomeFormState>;
 
 const initial: IncomeFormState = { status: "idle" };
 
@@ -21,23 +44,28 @@ function todayIso() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-export function IncomeForm({
-  portfolios,
-  sourceLabels,
-}: {
+interface FormProps {
+  action: Action;
   portfolios: Portfolio[];
   sourceLabels: string[];
-}) {
-  const [state, action, pending] = useActionState(createIncome, initial);
+  mode: "create" | "edit";
+  income?: IncomeInput;
+  submitLabel: string;
+}
+
+export function IncomeForm(props: FormProps) {
+  const [state, action, pending] = useActionState(props.action, initial);
 
   // Clearing the form is a remount, not a pile of setState calls in an effect:
   // a new income id per success changes the key, React throws the old fields
   // away, and every default (including today's date) re-initialises for free.
+  //
+  // In edit mode the key never changes: updateIncome redirects to the list
+  // rather than returning a success state, so there is nothing to clear.
   return (
     <IncomeFields
       key={state.status === "success" ? state.incomeId : "entry"}
-      portfolios={portfolios}
-      sourceLabels={sourceLabels}
+      {...props}
       action={action}
       pending={pending}
       state={state}
@@ -48,22 +76,34 @@ export function IncomeForm({
 function IncomeFields({
   portfolios,
   sourceLabels,
+  mode,
+  income,
+  submitLabel,
   action,
   pending,
   state,
-}: {
-  portfolios: Portfolio[];
-  sourceLabels: string[];
+}: Omit<FormProps, "action"> & {
   action: (formData: FormData) => void;
   pending: boolean;
   state: IncomeFormState;
 }) {
+  const editing = mode === "edit" && income !== undefined;
+
+  // 'other' is not in the picker — naming your own source IS that member — so a
+  // row already stored against it reopens on the custom entry with its name
+  // filled in, rather than on a blank select that would erase it on save.
+  const isCustomSource = income?.source === CUSTOM_INCOME_SOURCE;
+
   // Only drives the placeholder and hint of the "from" field — the value itself
   // is read from FormData, so this never has to round-trip to the server.
-  const [source, setSource] = useState("");
+  const [source, setSource] = useState(
+    isCustomSource ? CUSTOM_CHOICE : (income?.source ?? ""),
+  );
 
   return (
     <form action={action} className="space-y-4">
+      {editing ? <input type="hidden" name="id" value={income.id} /> : null}
+
       <div className="grid grid-cols-2 gap-4">
         <Field label="Amount" htmlFor="amount">
           <Input
@@ -73,6 +113,7 @@ function IncomeFields({
             step="any"
             min="0.01"
             required
+            defaultValue={income?.amount}
             placeholder="0.00"
           />
         </Field>
@@ -82,7 +123,7 @@ function IncomeFields({
             id="txn_date"
             name="txn_date"
             type="date"
-            defaultValue={todayIso()}
+            defaultValue={income?.txn_date ?? todayIso()}
             required
           />
         </Field>
@@ -91,9 +132,18 @@ function IncomeFields({
       <Field
         label="Into account"
         htmlFor="portfolio_id"
-        hint="The amount is recorded in this account's own currency."
+        hint={
+          editing
+            ? "Changing this moves the money to the other account's balance."
+            : "The amount is recorded in this account's own currency."
+        }
       >
-        <Select id="portfolio_id" name="portfolio_id" required defaultValue="">
+        <Select
+          id="portfolio_id"
+          name="portfolio_id"
+          required
+          defaultValue={income?.portfolio_id ?? ""}
+        >
           <option value="">Select account…</option>
           {portfolios.map((p) => (
             <option key={p.id} value={p.id}>
@@ -110,6 +160,7 @@ function IncomeFields({
         name="source"
         required
         placeholder="Select source…"
+        defaultValue={isCustomSource ? CUSTOM_CHOICE : (income?.source ?? "")}
         options={PICKABLE_INCOME_SOURCES.map((s) => ({
           value: s.value,
           label: s.label,
@@ -119,6 +170,7 @@ function IncomeFields({
           name: "source_label",
           label: "Source name",
           placeholder: "e.g. Royalties",
+          defaultValue: income?.source_label ?? undefined,
           suggestions: sourceLabels,
         }}
         onValueChange={setSource}
@@ -151,6 +203,7 @@ function IncomeFields({
           id="source_name"
           name="source_name"
           type="text"
+          defaultValue={income?.source_name ?? ""}
           placeholder={sourceNamePlaceholder(source)}
         />
       </Field>
@@ -160,11 +213,17 @@ function IncomeFields({
           id="description"
           name="description"
           type="text"
+          defaultValue={income?.description ?? ""}
           placeholder="Add a note…"
         />
       </Field>
 
-      <Checkbox id="is_recurring" name="is_recurring" label="This repeats regularly" />
+      <Checkbox
+        id="is_recurring"
+        name="is_recurring"
+        defaultChecked={income?.is_recurring ?? false}
+        label="This repeats regularly"
+      />
 
       {/* Both mounted always, filled conditionally — a live region created at
           the same moment it gains text is usually not announced, and the
@@ -177,7 +236,7 @@ function IncomeFields({
       </Alert>
 
       <Button type="submit" disabled={pending} className="w-full">
-        {pending ? "Saving…" : "Add income"}
+        {pending ? "Saving…" : submitLabel}
       </Button>
     </form>
   );

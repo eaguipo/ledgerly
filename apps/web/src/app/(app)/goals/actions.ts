@@ -149,6 +149,115 @@ export async function createGoal(
   return { status: "success", goalId: created?.goal?.goal_id ?? crypto.randomUUID() };
 }
 
+/**
+ * Rename a goal, or correct its target or target date.
+ *
+ * Goals move no money (decision D2), so unlike editing an expense there is no
+ * ledger row to replace — this is a plain PATCH. What it does trip is
+ * trg_goal_status, a BEFORE trigger on `goals`: lowering the target below what
+ * is already set aside completes the goal on the spot, and raising it above
+ * demotes an achieved goal back to active. Both are correct and automatic, and
+ * `first_achieved_at` survives either way.
+ *
+ * The currency and the linked account are deliberately not editable. Both are
+ * validated against each other by create_goal(), which is the one place that
+ * check lives — re-pointing a goal means making a new one.
+ *
+ * Redirects on success rather than returning a state, the same way
+ * updatePortfolio and updateExpense do: this runs on /goals/[id] and sends you
+ * back to the list.
+ */
+export async function updateGoal(
+  _prev: GoalFormState,
+  formData: FormData,
+): Promise<GoalFormState> {
+  const elapsed = startTimer();
+  const { log } = await requireUser("updateGoal");
+
+  const id = String(formData.get("id") ?? "").trim();
+  if (!id) {
+    log.warn("goal.update.invalid", { message: "missing goal id" });
+    return { status: "error", message: "Missing goal id." };
+  }
+
+  const name = String(formData.get("name") ?? "").trim();
+  const rawTarget = String(formData.get("target_amount") ?? "").trim();
+  // Blank clears the date rather than leaving the old one — an emptied field has
+  // to mean "no target date any more".
+  const targetDate = String(formData.get("target_date") ?? "").trim() || null;
+
+  const target = parseFloat(rawTarget);
+
+  log.debug("goal.update.start", {
+    goalId: id,
+    nameLength: name.length,
+    rawTarget,
+    targetDate,
+  });
+
+  const reject = (field: string, message: string): GoalFormState => {
+    log.warn("goal.update.invalid", {
+      goalId: id,
+      field,
+      message,
+      rawTarget,
+      targetDate,
+      durationMs: elapsed(),
+    });
+    return { status: "error", message };
+  };
+
+  if (!name) return reject("name", "Give the goal a name.");
+  if (!Number.isFinite(target) || target <= 0)
+    return reject("target_amount", "Target must be greater than zero.");
+
+  const res = await ledgerFetch(`/ledger/goals/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      name,
+      target_amount: target,
+      target_date: targetDate,
+    }),
+  });
+
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    const fields = {
+      goalId: id,
+      status: res.status,
+      reason: body?.error ?? "(no error body)",
+      target,
+      targetDate,
+      durationMs: elapsed(),
+    };
+    if (res.status >= 500 || res.status === 401 || res.status === 403) {
+      log.error("goal.update.rejected", fields);
+    } else {
+      log.warn("goal.update.rejected", fields);
+    }
+    return { status: "error", message: body?.error ?? "Failed to save the goal." };
+  }
+
+  const updated = (await res.json().catch(() => null)) as {
+    goal?: { status?: string; current_amount?: string };
+  } | null;
+
+  log.info("goal.update.ok", {
+    goalId: id,
+    target,
+    targetDate,
+    // The trigger may have moved the goal between active and achieved on this
+    // update alone — worth recording, since nothing the user did says "achieve".
+    statusAfter: updated?.goal?.status ?? null,
+    durationMs: elapsed(),
+  });
+
+  // No balance moved — /portfolios is untouched by design.
+  revalidatePath("/goals");
+  revalidatePath("/dashboard");
+  redirect("/goals");
+}
+
 export async function contributeToGoal(
   _prev: ContributionFormState,
   formData: FormData,

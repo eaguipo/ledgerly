@@ -7,7 +7,7 @@ import { startTimer } from "@/lib/logger";
 import { requestLogger } from "@/lib/request-context";
 import { InvestmentForm } from "./investment-form";
 import { ValuationForm } from "./valuation-form";
-import { closeInvestment, reopenInvestment } from "./actions";
+import { createInvestment, closeInvestment, reopenInvestment } from "./actions";
 import {
   formatDate,
   formatQuantity,
@@ -389,10 +389,13 @@ export default async function InvestmentsPage({
               </p>
             ) : (
               <InvestmentForm
+                mode="create"
+                action={createInvestment}
                 accounts={accounts}
                 currencies={currencies}
                 kindLabels={kindLabels}
                 defaultCurrencyId={profile?.default_currency_id ?? undefined}
+                submitLabel="Add investment"
               />
             )}
           </CardBody>

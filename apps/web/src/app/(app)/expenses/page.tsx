@@ -6,6 +6,7 @@ import { ledgerFetch } from "@/lib/ledger";
 import { startTimer } from "@/lib/logger";
 import { requestLogger } from "@/lib/request-context";
 import { ExpenseForm } from "./expense-form";
+import { createExpense } from "./actions";
 import { PageContainer, PageHeader } from "@/components/shell/page-header";
 import { Card, CardBody, CardHeader } from "@/components/ui/card";
 import { Table, Th, Tr, Td } from "@/components/ui/table";
@@ -33,6 +34,11 @@ interface Category {
 interface ExpenseRow {
   id: string;
   merchant: string | null;
+  // Set when this row is another feature's ledger leg: create_investment()'s
+  // purchase or create_debt()'s lending. Never shown — used only to withhold the
+  // Edit link, since update_expense() refuses both.
+  investment_id: string | null;
+  debt_id: string | null;
   category: { name: string } | null;
   transaction: {
     id: string;
@@ -174,6 +180,9 @@ export default async function ExpensesPage() {
                     <Th>Detail</Th>
                     <Th>Account</Th>
                     <Th align="right">Amount</Th>
+                    <Th align="right">
+                      <span className="sr-only">Actions</span>
+                    </Th>
                   </>
                 }
               >
@@ -183,6 +192,10 @@ export default async function ExpensesPage() {
                   const cat = one(e.category);
                   const cur = one(txn.currency);
                   const portfolio = one(txn.portfolio);
+                  // An investment purchase or a lending leg is owned by the
+                  // investment or the debt, and update_expense() refuses both —
+                  // so this offers a link to the owner instead of an editor.
+                  const ownedElsewhere = Boolean(e.investment_id ?? e.debt_id);
 
                   return (
                     <Tr key={e.id}>
@@ -217,6 +230,27 @@ export default async function ExpensesPage() {
                           className="font-medium"
                         />
                       </Td>
+                      <Td align="right">
+                        {ownedElsewhere ? (
+                          <Link
+                            href={
+                              e.investment_id
+                                ? `/investments/${e.investment_id}`
+                                : `/debts/${e.debt_id}`
+                            }
+                            className="whitespace-nowrap rounded-lg px-2 py-1 text-[13px] text-muted transition-colors hover:bg-raised hover:text-ink"
+                          >
+                            {e.investment_id ? "Investment" : "Debt"} →
+                          </Link>
+                        ) : (
+                          <Link
+                            href={`/expenses/${e.id}`}
+                            className="rounded-lg px-2 py-1 text-[13px] text-muted transition-colors hover:bg-raised hover:text-ink"
+                          >
+                            Edit
+                          </Link>
+                        )}
+                      </Td>
                     </Tr>
                   );
                 })}
@@ -234,7 +268,13 @@ export default async function ExpensesPage() {
                 unavailable until the expense service is reachable again.
               </p>
             ) : hasAccounts ? (
-              <ExpenseForm portfolios={portfolios} categories={categories} />
+              <ExpenseForm
+                mode="create"
+                action={createExpense}
+                portfolios={portfolios}
+                categories={categories}
+                submitLabel="Add expense"
+              />
             ) : (
               <p className="text-[13px] text-muted">
                 You need at least one account before recording expenses.{" "}

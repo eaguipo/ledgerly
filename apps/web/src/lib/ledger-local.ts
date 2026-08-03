@@ -24,15 +24,60 @@ import { distinctLabels } from "@/lib/custom-choice";
  */
 
 /** Same embed strings the ledger uses — see services/ledger/src/server.ts. */
+// investment_id / debt_id are for the list's benefit, not to be shown: a row
+// carrying either is another feature's ledger leg, and the list uses them to
+// withhold Edit and Delete rather than offer an action the RPC will refuse.
 const EXPENSE_SELECT =
-  "id, merchant, category:expense_categories(name), " +
+  "id, merchant, investment_id, debt_id, category:expense_categories(name), " +
   "transaction:transactions!expenses_txn_kind_fk(id, amount, txn_date, description, " +
   "currency:currencies(code, symbol, minor_unit), portfolio:portfolios(name))";
 
 const INCOME_SELECT =
-  "id, source, source_name, source_label, is_recurring, " +
+  "id, source, source_name, source_label, is_recurring, debt_id, " +
   "transaction:transactions!incomes_txn_kind_fk(id, amount, txn_date, description, " +
   "currency:currencies(code, symbol, minor_unit), portfolio:portfolios(name))";
+
+/**
+ * What an EDIT form needs, as opposed to what a list renders: raw ids instead of
+ * display names, plus the columns that say whether this row is another feature's
+ * ledger leg (`investment_id` / `debt_id`) and so belongs to that page, not this
+ * one. Kept beside the display selects so the pair cannot drift apart.
+ */
+const EXPENSE_EDIT_SELECT =
+  "id, merchant, category_id, investment_id, debt_id, " +
+  "transaction:transactions!expenses_txn_kind_fk(" +
+  "id, amount, txn_date, description, portfolio_id)";
+
+const INCOME_EDIT_SELECT =
+  "id, source, source_name, source_label, is_recurring, debt_id, " +
+  "transaction:transactions!incomes_txn_kind_fk(" +
+  "id, amount, txn_date, description, portfolio_id)";
+
+/**
+ * Fields a PATCH may carry, mirroring what services/ledger/src/server.ts
+ * validates. `undefined` means "leave alone" and an explicit null means "clear",
+ * which is why these are copied by presence rather than by truthiness.
+ */
+const EXPENSE_PATCHABLE = [
+  "portfolio_id",
+  "category_id",
+  "new_category",
+  "amount",
+  "txn_date",
+  "description",
+  "merchant",
+] as const;
+
+const INCOME_PATCHABLE = [
+  "portfolio_id",
+  "amount",
+  "source",
+  "source_label",
+  "source_name",
+  "txn_date",
+  "description",
+  "is_recurring",
+] as const;
 
 const TRANSFER_SELECT =
   "id, amount, fee, exchange_rate, amount_received, txn_date, note, " +
@@ -59,7 +104,7 @@ const GOAL_SELECT =
 const INVESTMENT_SELECT =
   "id, name, kind, kind_label, symbol, quantity, average_cost, invested_amount, " +
   "current_value, unrealized_gain, opened_on, maturity_date, is_active, " +
-  "portfolio_id, created_at, currency:currencies(code, symbol, minor_unit), " +
+  "portfolio_id, currency_id, created_at, currency:currencies(code, symbol, minor_unit), " +
   "portfolio:portfolios(name)";
 
 const SNAPSHOT_SELECT =
@@ -162,6 +207,54 @@ export async function localLedger(
     return done(error ? dbFail(error) : json({ expense: data }, 201));
   }
 
+  // Matched AFTER "/expenses/options" above — "options" is a valid capture for
+  // this regex, and the order is what stops it being treated as an id.
+  const expenseId = route.match(/^\/expenses\/([^/]+)$/)?.[1];
+
+  if (expenseId && method === "GET") {
+    if (!UUID_RE.test(expenseId))
+      return done(json({ error: "Invalid expense id." }, 400));
+    const { data, error } = await sb
+      .from("expenses")
+      .select(EXPENSE_EDIT_SELECT)
+      .eq("id", expenseId)
+      .maybeSingle();
+    if (error) return done(dbFail(error));
+    if (!data) return done(json({ error: "Expense not found." }, 404));
+    return done(json({ expense: data }));
+  }
+
+  if (expenseId && method === "PATCH") {
+    if (!UUID_RE.test(expenseId))
+      return done(json({ error: "Invalid expense id." }, 400));
+    // Allow-listed rather than forwarded whole, so the two transports accept
+    // exactly the same fields — a patch that works on the mesh and not on Vercel
+    // is the failure mode this file exists to prevent.
+    const patch: Record<string, unknown> = {};
+    for (const field of EXPENSE_PATCHABLE) {
+      if (body[field] !== undefined) patch[field] = body[field];
+    }
+    // An existing category wins over a typed one, the precedence create_expense
+    // and update_expense both apply.
+    if (patch.category_id) delete patch.new_category;
+    if (Object.keys(patch).length === 0)
+      return done(json({ error: "Nothing to update." }, 400));
+    const { data, error } = await sb.rpc("do_expense_update", {
+      _expense_id: expenseId,
+      _patch: patch,
+    });
+    return done(error ? dbFail(error) : json({ expense: data }));
+  }
+
+  if (expenseId && method === "DELETE") {
+    if (!UUID_RE.test(expenseId))
+      return done(json({ error: "Invalid expense id." }, 400));
+    const { data, error } = await sb.rpc("do_expense_delete", {
+      _expense_id: expenseId,
+    });
+    return done(error ? dbFail(error) : json({ deleted: data }));
+  }
+
   // ---- incomes -----------------------------------------------------------
   if (route === "/incomes" && method === "GET") {
     const { data, error } = await sb
@@ -211,6 +304,46 @@ export async function localLedger(
       _source_label: body.source_label ?? null,
     });
     return done(error ? dbFail(error) : json({ income: data }, 201));
+  }
+
+  const incomeId = route.match(/^\/incomes\/([^/]+)$/)?.[1];
+
+  if (incomeId && method === "GET") {
+    if (!UUID_RE.test(incomeId))
+      return done(json({ error: "Invalid income id." }, 400));
+    const { data, error } = await sb
+      .from("incomes")
+      .select(INCOME_EDIT_SELECT)
+      .eq("id", incomeId)
+      .maybeSingle();
+    if (error) return done(dbFail(error));
+    if (!data) return done(json({ error: "Income entry not found." }, 404));
+    return done(json({ income: data }));
+  }
+
+  if (incomeId && method === "PATCH") {
+    if (!UUID_RE.test(incomeId))
+      return done(json({ error: "Invalid income id." }, 400));
+    const patch: Record<string, unknown> = {};
+    for (const field of INCOME_PATCHABLE) {
+      if (body[field] !== undefined) patch[field] = body[field];
+    }
+    if (Object.keys(patch).length === 0)
+      return done(json({ error: "Nothing to update." }, 400));
+    const { data, error } = await sb.rpc("do_income_update", {
+      _income_id: incomeId,
+      _patch: patch,
+    });
+    return done(error ? dbFail(error) : json({ income: data }));
+  }
+
+  if (incomeId && method === "DELETE") {
+    if (!UUID_RE.test(incomeId))
+      return done(json({ error: "Invalid income id." }, 400));
+    const { data, error } = await sb.rpc("do_income_delete", {
+      _income_id: incomeId,
+    });
+    return done(error ? dbFail(error) : json({ deleted: data }));
   }
 
   // ---- transfers ---------------------------------------------------------
@@ -386,6 +519,18 @@ export async function localLedger(
   const goalId = route.match(/^\/goals\/([^/]+)$/)?.[1];
   const contributionsFor = route.match(/^\/goals\/([^/]+)\/contributions$/)?.[1];
 
+  if (goalId && method === "GET") {
+    if (!UUID_RE.test(goalId)) return done(json({ error: "Invalid goal id." }, 400));
+    const { data, error } = await sb
+      .from("goals")
+      .select(GOAL_SELECT)
+      .eq("id", goalId)
+      .maybeSingle();
+    if (error) return done(dbFail(error));
+    if (!data) return done(json({ error: "Goal not found." }, 404));
+    return done(json({ goal: data }));
+  }
+
   if (goalId && method === "PATCH") {
     if (!UUID_RE.test(goalId)) return done(json({ error: "Invalid goal id." }, 400));
     // No status special-case here, unlike the debts PATCH: trg_goal_status is a
@@ -488,7 +633,7 @@ export async function localLedger(
   if (investmentId && method === "GET") {
     if (!UUID_RE.test(investmentId))
       return done(json({ error: "Invalid investment id." }, 400));
-    const [investment, snapshots] = await Promise.all([
+    const [investment, snapshots, purchase] = await Promise.all([
       sb.from("investments").select(INVESTMENT_SELECT).eq("id", investmentId).maybeSingle(),
       sb
         .from("investment_snapshots")
@@ -497,12 +642,25 @@ export async function localLedger(
         .order("as_of_date", { ascending: false })
         .order("created_at", { ascending: false })
         .limit(200),
+      // The purchase leg, if this holding posted one — NOT the same question as
+      // investments.portfolio_id, which on a pre-money_invested.sql holding was
+      // only ever a label. See the ledger route.
+      sb
+        .from("expenses")
+        .select("transaction_id, transaction:transactions(amount, txn_date, portfolio_id)")
+        .eq("investment_id", investmentId)
+        .limit(1)
+        .maybeSingle(),
     ]);
     const error = investment.error ?? snapshots.error;
     if (error) return done(dbFail(error));
     if (!investment.data) return done(json({ error: "Investment not found." }, 404));
     return done(
-      json({ investment: investment.data, snapshots: snapshots.data ?? [] }),
+      json({
+        investment: investment.data,
+        snapshots: snapshots.data ?? [],
+        purchase: purchase.data ?? null,
+      }),
     );
   }
 
@@ -525,6 +683,7 @@ export async function localLedger(
       "invested_amount",
       "quantity",
       "average_cost",
+      "opened_on",
       "maturity_date",
       "portfolio_id",
       "is_active",
@@ -533,26 +692,40 @@ export async function localLedger(
     for (const field of PATCHABLE) {
       if (body[field] !== undefined) patch[field] = body[field];
     }
-    // Re-classifying away from the catch-all kind has to clear kind_label in the
-    // SAME statement, or investment_kind_label_only_other rejects the update.
-    if (
-      typeof patch.kind === "string" &&
-      patch.kind !== "other_asset" &&
-      body.kind_label === undefined
-    ) {
-      patch.kind_label = null;
-    }
     if (Object.keys(patch).length === 0)
       return done(json({ error: "Nothing to update." }, 400));
-    const { data, error } = await sb
-      .from("investments")
-      .update(patch)
-      .eq("id", investmentId)
-      .select(INVESTMENT_SELECT)
-      .maybeSingle();
+    // Through do_investment_update rather than a direct table write: a holding
+    // bought from an account has a real ledger row behind it, and a plain
+    // `update investments set invested_amount = …` would leave that row — and
+    // the paying account's balance — saying something different. The RPC also
+    // handles clearing kind_label when the kind moves off the catch-all, which
+    // this handler used to have to do itself.
+    const { error } = await sb.rpc("do_investment_update", {
+      _investment_id: investmentId,
+      _patch: patch,
+    });
     if (error) return done(dbFail(error));
+    // The RPC returns a summary, not the row — re-read so this answers with the
+    // same shape as the ledger route.
+    const { data } = await sb
+      .from("investments")
+      .select(INVESTMENT_SELECT)
+      .eq("id", investmentId)
+      .maybeSingle();
     if (!data) return done(json({ error: "Investment not found." }, 404));
     return done(json({ investment: data }));
+  }
+
+  if (investmentId && method === "DELETE") {
+    if (!UUID_RE.test(investmentId))
+      return done(json({ error: "Invalid investment id." }, 400));
+    // Deletes the valuation history AND the purchase that paid for the holding
+    // — see the ledger route for why leaving the purchase behind would make it
+    // read as ordinary spending.
+    const { data, error } = await sb.rpc("do_investment_delete", {
+      _investment_id: investmentId,
+    });
+    return done(error ? dbFail(error) : json({ deleted: data }));
   }
 
   if (snapshotsFor && method === "POST") {

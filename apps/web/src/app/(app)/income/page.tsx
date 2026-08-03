@@ -6,6 +6,7 @@ import { ledgerFetch } from "@/lib/ledger";
 import { startTimer } from "@/lib/logger";
 import { requestLogger } from "@/lib/request-context";
 import { IncomeForm } from "./income-form";
+import { createIncome } from "./actions";
 import { incomeSourceDisplay } from "./constants";
 import { PageContainer, PageHeader } from "@/components/shell/page-header";
 import { Card, CardBody, CardHeader } from "@/components/ui/card";
@@ -33,6 +34,9 @@ interface IncomeRow {
   /** The user's own name for an 'other' source; null on the enum's members. */
   source_label: string | null;
   is_recurring: boolean;
+  // Set when this row is create_debt()'s disbursement leg. Never shown — used
+  // only to withhold the Edit link, since update_income() refuses it.
+  debt_id: string | null;
   transaction: {
     id: string;
     amount: number | string;
@@ -165,6 +169,9 @@ export default async function IncomePage() {
                     <Th>Detail</Th>
                     <Th>Account</Th>
                     <Th align="right">Amount</Th>
+                    <Th align="right">
+                      <span className="sr-only">Actions</span>
+                    </Th>
                   </>
                 }
               >
@@ -173,6 +180,10 @@ export default async function IncomePage() {
                   if (!txn) return null;
                   const cur = one(txn.currency);
                   const portfolio = one(txn.portfolio);
+                  // A debt disbursement is owned by the debt, and
+                  // update_income() refuses it — link to the owner instead.
+                  const ownedByDebt =
+                    Boolean(i.debt_id) || i.source === "loan_received";
 
                   return (
                     <Tr key={i.id}>
@@ -213,6 +224,23 @@ export default async function IncomePage() {
                           className="font-medium"
                         />
                       </Td>
+                      <Td align="right">
+                        {ownedByDebt ? (
+                          <Link
+                            href={i.debt_id ? `/debts/${i.debt_id}` : "/debts"}
+                            className="whitespace-nowrap rounded-lg px-2 py-1 text-[13px] text-muted transition-colors hover:bg-raised hover:text-ink"
+                          >
+                            Debt →
+                          </Link>
+                        ) : (
+                          <Link
+                            href={`/income/${i.id}`}
+                            className="rounded-lg px-2 py-1 text-[13px] text-muted transition-colors hover:bg-raised hover:text-ink"
+                          >
+                            Edit
+                          </Link>
+                        )}
+                      </Td>
                     </Tr>
                   );
                 })}
@@ -230,7 +258,13 @@ export default async function IncomePage() {
                 until the income service is reachable again.
               </p>
             ) : hasAccounts ? (
-              <IncomeForm portfolios={portfolios} sourceLabels={sourceLabels} />
+              <IncomeForm
+                mode="create"
+                action={createIncome}
+                portfolios={portfolios}
+                sourceLabels={sourceLabels}
+                submitLabel="Add income"
+              />
             ) : (
               <p className="text-[13px] text-muted">
                 You need at least one account before recording income.{" "}
