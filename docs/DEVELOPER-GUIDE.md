@@ -93,6 +93,9 @@ Supabase SQL Editor → New query → paste and run each file, one at a time:
      cashflow_excludes_debt_origination.sql  needs create_debt.sql (references the
                                     loan_received enum value it adds). Keeps
                                     borrowing/lending out of the report views.
+     v_income_by_source.sql         also needs create_debt.sql, for the same enum
+                                    value. The income-side counterpart to
+                                    v_expense_by_category, used by /reports.
      money_invested.sql             needs create_investment.sql (replaces it).
                                     Buying an investment posts a real outflow;
                                     adds expenses.investment_id and re-creates

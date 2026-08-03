@@ -193,9 +193,14 @@ export default async function ReportsPage({
       .from("v_debt_outstanding")
       .select("debt_id, kind, counterparty, outstanding_balance, status, currency_code")
       .eq("currency_code", code),
+    // Joined to debts purely to scope this to ONE currency. debt_payments has
+    // no currency column of its own, so without the !inner join this summed
+    // pesos and dollars into a single figure and printed it with one symbol —
+    // the exact apples-to-oranges total the rest of the report exists to avoid.
     supabase
       .from("debt_payments")
-      .select("id, amount, principal_portion, interest_portion, payment_date")
+      .select("id, amount, principal_portion, interest_portion, payment_date, debt:debts!inner(currency_id)")
+      .eq("debt.currency_id", currency?.id ?? "")
       .gte("payment_date", query.from)
       .lte("payment_date", query.to),
     supabase
@@ -286,10 +291,9 @@ export default async function ReportsPage({
   // Summaries. The balance-style ones are CURRENT, not range-scoped — a balance
   // has no "as of last month" without replaying the ledger, and pretending
   // otherwise would be the most misleading thing on the page. Labelled as such.
-  const liquid = roundToMinorUnit(
-    sum(activeBalances.filter((b) => b.is_liquid), (b) => b.current_balance),
-    minor,
-  );
+  // Scoped to this report's currency BEFORE anything is summed. Summing
+  // `activeBalances` directly would total every currency the user holds and then
+  // label the result with one symbol.
   const codeBalances = activeBalances.filter((b) => b.currency_code === code);
   const owed = roundToMinorUnit(
     sum(debtRows.filter((d) => d.kind === "payable"), (d) => d.outstanding_balance),
@@ -311,7 +315,7 @@ export default async function ReportsPage({
 
   const capHit = txnRows.length >= TXN_ROW_LIMIT;
   const countedCount = txnRows.filter(isCounted).length;
-  const liquidLocal = roundToMinorUnit(
+  const liquidHere = roundToMinorUnit(
     sum(codeBalances.filter((b) => b.is_liquid), (b) => b.current_balance),
     minor,
   );
@@ -486,7 +490,7 @@ export default async function ReportsPage({
             <li>
               <Eyebrow>Liquid</Eyebrow>
               <p className="mt-1.5 text-lg font-semibold text-ink">
-                <Money amount={liquidLocal} currency={currency} />
+                <Money amount={liquidHere} currency={currency} />
               </p>
               <p className="mt-0.5 text-xs text-faint">Cash and savings</p>
             </li>
@@ -525,7 +529,7 @@ export default async function ReportsPage({
       <Card className="mt-5">
         <CardHeader
           title="Accounts"
-          description={`Current balances in ${code} · ${formatMoney(liquid, currency)} of it liquid`}
+          description={`Current balances in ${code} · ${formatMoney(liquidHere, currency)} of it liquid`}
         />
         {codeBalances.length === 0 ? (
           <CardBody>

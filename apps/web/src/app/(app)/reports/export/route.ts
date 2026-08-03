@@ -156,7 +156,20 @@ export async function GET(request: Request) {
 
   const filename = `ledgerly-${code}-${query.from}-to-${query.to}.csv`;
 
-  return new Response(lines.join("\r\n"), {
+  // CRLF per RFC 4180, and a UTF-8 BOM. The BOM is what makes Excel on Windows
+  // read the file as UTF-8 rather than the system codepage — without it, any
+  // non-ASCII character in a description or account name arrives as mojibake.
+  // The cost is that a naive parser reading raw UTF-8 sees a zero-width prefix
+  // on the first header; Excel and Google Sheets, which is what people actually
+  // open this in, both strip it, and Python needs `utf-8-sig`.
+  //
+  // Written as an escape, never as a literal character: a BOM pasted into source
+  // is invisible, and the next formatter or editor to touch this file could drop
+  // it without anyone noticing until a spreadsheet renders ₱ as gibberish.
+  const BOM = "\uFEFF";
+  const body = `${BOM}${lines.join("\r\n")}\r\n`;
+
+  return new Response(body, {
     status: 200,
     headers: {
       // charset matters: symbols like ₱ are multi-byte, and a spreadsheet that

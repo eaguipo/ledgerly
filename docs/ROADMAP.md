@@ -120,16 +120,23 @@ no UI dependencies and already ships two accessible SVG charts), and **the parke
 fix must land first** — until it does, buying an asset counts as spending and every figure here
 inherits that error.
 
-- **Date-range report (Rule 15):** start/end pickers showing only in-range transactions — incoming
-  cash, all expenses, total inflow, total outflow, net.
-- **Summaries:** liquid money by currency; investment accounts + balances; remaining debt + payments
-  in period; completed goals; per-portfolio balance summaries.
-- **Dashboard:** headline cards (net worth, this-month inflow/outflow, total debt) + 1–2 charts
-  (spending by category, inflow vs outflow over time) with a light lib like Recharts.
-- Do aggregation in Postgres views/RPC (already provided) — small results, fast, low bandwidth.
-- CSV export of a report — a cheap, nice win.
+- **Date-range report (Rule 15):** ✅ `/reports` — start/end pickers plus presets, in-range
+  transactions, total inflow, total outflow, net. Range and currency live in the URL, so a report is
+  shareable and survives reload. Rows the totals exclude (transfers, asset purchases, borrowing) are
+  listed and badged rather than hidden, so the detail explains the summary.
+- **Summaries:** ✅ liquid money, per-portfolio balances, remaining debt + payments in period,
+  completed goals, investments. Balances are current and say so — a historical balance would mean
+  replaying the ledger.
+- **Dashboard:** ✅ headline cards (Liquid, Beyond spendable cash, Debts, Goals — from Phase 4) plus
+  spending by **expense** category this month, distinct from the Allocation card's *portfolio*
+  category. Charts stayed hand-rolled: `AllocationBars` already was the spending chart, and `FlowBars`
+  (inflow vs outflow) was the only new one needed. No Recharts, no first UI dependency.
+- ✅ Aggregation happens in Postgres views — the app adds up per-day rows and nothing else. One new
+  view, `v_income_by_source`.
+- **CSV export** ✅ at `/reports/export`: every field quoted, ISO dates, one currency per file, and a
+  stated cap rather than a silent truncation.
 
-**Deliverable:** a real dashboard and date-range report covering every Reporting Requirement.
+**Deliverable:** ✅ a real dashboard and date-range report covering every Reporting Requirement.
 
 ---
 

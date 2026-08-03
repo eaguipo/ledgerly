@@ -86,6 +86,8 @@ personal-finance-tracker/
     ├── create_debt_payment.sql    service-role sibling of do_debt_payment(), plus overpayment guards
     ├── debt_principal_recompute.sql  recompute_debt() helper + the debts-side trigger
     ├── cashflow_excludes_debt_origination.sql  keeps borrowing/lending out of inflow-outflow
+    ├── v_income_by_source.sql     income-side counterpart to v_expense_by_category;
+    │                              drops loan_received so the two agree on a month
     ├── create_goal.sql            goal + linked-account currency check (no money moves)
     ├── create_goal_contribution.sql  earmark/withdraw, plus the over-withdrawal guard
     ├── create_investment.sql      holding + funding-account currency check (no money

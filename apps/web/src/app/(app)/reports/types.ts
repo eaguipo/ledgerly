@@ -82,13 +82,20 @@ export interface CompletedGoalRow {
   currency_code: string;
 }
 
-/** A debt payment made inside the range. Read from the table, not a view. */
+/**
+ * A debt payment made inside the range. Read from the table, not a view.
+ *
+ * The `debt` embed is not displayed — it exists so the query can filter on the
+ * parent debt's currency. `debt_payments` has no currency column of its own, and
+ * without that join the range's payments would be summed across every currency.
+ */
 export interface DebtPaymentRow {
   id: string;
   amount: number | string;
   principal_portion: number | string;
   interest_portion: number | string;
   payment_date: string;
+  debt: { currency_id: string } | { currency_id: string }[] | null;
 }
 
 /**

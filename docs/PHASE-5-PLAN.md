@@ -251,15 +251,47 @@ truncated export is a corrupted record.
 
 ## 10. Suggested split
 
-**PR 5a — "Money Invested" first** (§4.1). Not nominally Phase 5, but Phase 5 is what makes it
-matter. Small, and specified in the parked backlog note.
+**PR 5a — "Money Invested" first** (§4.1) ✅ *built 2026-08-03*. Not nominally Phase 5, but Phase 5 is
+what makes it matter. SQL applied and verified.
 
-**PR 5b — The date-range report.** `v_income_by_source.sql`, `/reports` with URL-driven range and
-currency, headline figures, the two `AllocationBars` breakdowns, summaries, and the capped
-transaction list. The bulk of the phase.
+**PR 5b — The date-range report** ✅ *built 2026-08-03*. `v_income_by_source.sql`, `/reports` with
+URL-driven range and currency, headline figures, the two `AllocationBars` breakdowns, summaries, and
+the capped transaction list.
 
-**PR 5c — Charts + CSV.** The inflow-vs-outflow component, the dashboard's spending-by-category card,
-and the export route. Separable because 5b is useful without either.
+**PR 5c — Charts + CSV** ✅ *built 2026-08-03*. `FlowBars`, the dashboard's spending-by-category card,
+and `/reports/export`.
+
+### Deviations from §6–8 as planned
+
+- **The transaction list shows every in-range row and badges the ones the totals exclude**, rather
+  than listing only counted rows. Showing only counted rows would reconcile perfectly but hide real
+  movements — a transfer you made would simply be absent with no explanation. The badge says *why*
+  the list doesn't sum to the headline.
+- **`rows.ts` was extracted**, which the plan didn't call for. `isCounted`, `rowLabel` and the
+  transaction select are shared by the page and the CSV export, because an export that labelled rows
+  differently from the screen — or disagreed about which rows count — is a quietly corrupted record
+  of the same range.
+- **The export cap is 5000 against the screen's 500.** On screen a cap is a readability choice; in an
+  export it is data loss, so the ceiling exists only for the function timeout.
+- **The CSV carries a UTF-8 BOM.** Without it Excel on Windows reads the system codepage and renders
+  ₱ as mojibake. Written as `"\uFEFF"`, never a literal character, so a formatter can't silently
+  drop it.
+- **Bucketing lives in `buckets.ts`** and runs server-side, so `FlowBars` never sees a currency or a
+  date — only pre-formatted labels.
+
+### Caught in review, after the feature "worked"
+
+Two cross-currency bugs of exactly the kind Phase 4 existed to remove, both introduced by this phase
+and both invisible in a single-currency account:
+
+- **`debt_payments` had no currency filter.** The table carries no currency column, so "paid in
+  range" summed pesos and dollars and printed the result with one symbol. Fixed with an `!inner`
+  join to `debts` on `currency_id`.
+- **The Accounts card's "of it liquid" figure summed every currency** while labelled with one. The
+  correctly-scoped variable existed three lines away and the wrong one was used.
+
+Neither would have failed a build, a lint, or a click-through in a single-currency account. Worth
+remembering the next time a report figure "looks about right".
 
 ---
 
