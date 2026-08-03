@@ -165,6 +165,10 @@ create table public.portfolios (
   user_id         uuid not null references public.profiles(id) on delete cascade,
   name            text not null,
   category        public.portfolio_category not null,
+  -- Free-text name for an account the five enum members don't describe. Only
+  -- ever set alongside category='others', so is_liquid and every rollup that
+  -- groups by category keep working — see db/functions/custom_option_labels.sql.
+  category_label  text,
   currency_id     uuid not null references public.currencies(id),
   purpose_tag_id  uuid references public.money_purpose_tags(id) on delete set null,
   opening_balance numeric(38,18) not null default 0,
@@ -179,7 +183,13 @@ create table public.portfolios (
   archived_at     timestamptz,
   created_at      timestamptz not null default now(),
   updated_at      timestamptz not null default now(),
-  constraint portfolio_name_not_blank check (char_length(trim(name)) > 0)
+  constraint portfolio_name_not_blank check (char_length(trim(name)) > 0),
+  -- Pins the label to the catch-all member: re-categorising an account away
+  -- from 'others' must clear its custom name rather than leave a stale one.
+  constraint portfolio_category_label_only_others check (
+    category_label is null
+    or (category = 'others' and char_length(btrim(category_label)) between 1 and 40)
+  )
 );
 create index idx_portfolios_user on public.portfolios(user_id);
 create index idx_portfolios_user_category on public.portfolios(user_id, category);
@@ -266,10 +276,18 @@ create table public.incomes (
   txn_kind       public.txn_kind not null,
   source         public.income_source not null,
   source_name    text,
+  -- Free-text name for a source the enum doesn't cover. Pinned to 'other' for
+  -- the same reason portfolios.category_label is pinned to 'others': income
+  -- reporting groups by `source` and must not grow unknown members.
+  source_label   text,
   debt_id        uuid references public.debts(id) on delete set null,
   is_recurring   boolean not null default false,
   created_at     timestamptz not null default now(),
   constraint incomes_kind_allowed check (txn_kind in ('income','debt_payment_received')),
+  constraint incomes_source_label_only_other check (
+    source_label is null
+    or (source = 'other' and char_length(btrim(source_label)) between 1 and 40)
+  ),
   constraint incomes_txn_kind_fk
     foreign key (transaction_id, txn_kind)
     references public.transactions(id, kind) on delete cascade

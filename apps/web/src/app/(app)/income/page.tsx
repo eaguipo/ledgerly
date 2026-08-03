@@ -6,7 +6,7 @@ import { ledgerFetch } from "@/lib/ledger";
 import { startTimer } from "@/lib/logger";
 import { requestLogger } from "@/lib/request-context";
 import { IncomeForm } from "./income-form";
-import { incomeSourceLabel } from "./constants";
+import { incomeSourceDisplay } from "./constants";
 import { PageContainer, PageHeader } from "@/components/shell/page-header";
 import { Card, CardBody, CardHeader } from "@/components/ui/card";
 import { Table, Th, Tr, Td } from "@/components/ui/table";
@@ -30,6 +30,8 @@ interface IncomeRow {
   id: string;
   source: string;
   source_name: string | null;
+  /** The user's own name for an 'other' source; null on the enum's members. */
+  source_label: string | null;
   is_recurring: boolean;
   transaction: {
     id: string;
@@ -77,9 +79,15 @@ export default async function IncomePage() {
   ]);
 
   const options = optionsRes.ok
-    ? ((await optionsRes.json()) as { portfolios?: Portfolio[] })
+    ? ((await optionsRes.json()) as {
+        portfolios?: Portfolio[];
+        source_labels?: string[];
+      })
     : {};
   const portfolios: Portfolio[] = options.portfolios ?? [];
+  // Custom source names this user has typed before — offered back as
+  // autocomplete so the same source doesn't accumulate three spellings.
+  const sourceLabels: string[] = options.source_labels ?? [];
 
   const list = listRes.ok
     ? ((await listRes.json()) as { incomes?: IncomeRow[] })
@@ -176,9 +184,12 @@ export default async function IncomePage() {
                       <Td>
                         <span className="flex flex-wrap items-center gap-2">
                           <span className="font-medium text-ink">
-                            {i.source_name ?? incomeSourceLabel(i.source)}
+                            {i.source_name ??
+                              incomeSourceDisplay(i.source, i.source_label)}
                           </span>
-                          <Badge>{incomeSourceLabel(i.source)}</Badge>
+                          <Badge>
+                            {incomeSourceDisplay(i.source, i.source_label)}
+                          </Badge>
                           {i.is_recurring ? (
                             <Badge tone="accent">recurring</Badge>
                           ) : null}
@@ -219,7 +230,7 @@ export default async function IncomePage() {
                 until the income service is reachable again.
               </p>
             ) : hasAccounts ? (
-              <IncomeForm portfolios={portfolios} />
+              <IncomeForm portfolios={portfolios} sourceLabels={sourceLabels} />
             ) : (
               <p className="text-[13px] text-muted">
                 You need at least one account before recording income.{" "}

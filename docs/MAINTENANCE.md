@@ -88,9 +88,12 @@ personal-finance-tracker/
     ├── cashflow_excludes_debt_origination.sql  keeps borrowing/lending out of inflow-outflow
     ├── create_goal.sql            goal + linked-account currency check (no money moves)
     ├── create_goal_contribution.sql  earmark/withdraw, plus the over-withdrawal guard
-    └── authenticated_entry_points.sql  do_income/do_expense/do_debt/do_goal/
-                                        do_goal_contribution — the RLS-path wrappers
-                                        the Vercel deploy writes through
+    ├── authenticated_entry_points.sql  do_income/do_expense/do_debt/do_goal/
+    │                                   do_goal_contribution — the RLS-path wrappers
+    │                                   the Vercel deploy writes through
+    └── custom_option_labels.sql    user-supplied options: the two label columns,
+                                    plus create_expense/create_income/do_expense/
+                                    do_income re-created with one more parameter
 ```
 
 Two kinds of file live in `db/functions/`, and they behave differently:
@@ -98,13 +101,16 @@ Two kinds of file live in `db/functions/`, and they behave differently:
 - **New objects** (`create_*.sql`, `authenticated_entry_points.sql`) exist only here. `schema.sql`
   knows nothing about them; they are applied by hand after it.
 - **Redefinitions of something `schema.sql` already creates** — currently
-  `debt_principal_recompute.sql` (§15c triggers) and `cashflow_excludes_debt_origination.sql`
-  (§19 views). These **must be kept byte-identical to `schema.sql`**, because re-running
+  `debt_principal_recompute.sql` (§15c triggers), `cashflow_excludes_debt_origination.sql`
+  (§19 views), and the `alter table` half of `custom_option_labels.sql` (§7/§10 columns).
+  These **must be kept byte-identical to `schema.sql`**, because re-running
   `schema.sql` on a live database would otherwise silently revert them.
 
 Apply order matters: `create_debt.sql` before `cashflow_excludes_debt_origination.sql` (which
-references the `loan_received` enum value it adds), and **every** `create_*` file before
-`authenticated_entry_points.sql` (which delegates to them all).
+references the `loan_received` enum value it adds), **every** `create_*` file before
+`authenticated_entry_points.sql` (which delegates to them all), and
+`custom_option_labels.sql` **last** — it drops and re-creates four of the functions those two
+files define, so anything applied after it would put the old signatures back.
 
 ---
 

@@ -1,6 +1,7 @@
 import { createClient } from "@/lib/supabase/server";
 import { log, startTimer } from "@/lib/logger";
 import { getRequestId } from "@/lib/request-context";
+import { distinctLabels } from "@/lib/custom-choice";
 
 /**
  * The ledger service's API, served in-process against Supabase.
@@ -29,7 +30,7 @@ const EXPENSE_SELECT =
   "currency:currencies(code, symbol, minor_unit), portfolio:portfolios(name))";
 
 const INCOME_SELECT =
-  "id, source, source_name, is_recurring, " +
+  "id, source, source_name, source_label, is_recurring, " +
   "transaction:transactions!incomes_txn_kind_fk(id, amount, txn_date, description, " +
   "currency:currencies(code, symbol, minor_unit), portfolio:portfolios(name))";
 
@@ -140,11 +141,14 @@ export async function localLedger(
   if (route === "/expenses" && method === "POST") {
     const { data, error } = await sb.rpc("do_expense", {
       _portfolio_id: body.portfolio_id,
-      _category_id: body.category_id,
+      _category_id: body.category_id ?? null,
       _amount: body.amount,
       _txn_date: body.txn_date,
       _description: body.description ?? null,
       _merchant: body.merchant ?? null,
+      // Null category + a name here means "create this category as part of the
+      // expense"; the RPC find-or-creates it in the same transaction.
+      _new_category: body.new_category ?? null,
     });
     return done(error ? dbFail(error) : json({ expense: data }, 201));
   }
@@ -160,8 +164,28 @@ export async function localLedger(
   }
 
   if (route === "/incomes/options" && method === "GET") {
-    const { data, error } = await activePortfolios(sb);
-    return done(error ? dbFail(error) : json({ portfolios: data ?? [] }));
+    const [portfolios, labels] = await Promise.all([
+      activePortfolios(sb),
+      // Capped: this only feeds an autocomplete list, and a user with thousands
+      // of income rows would otherwise pull them all to find a handful of names.
+      sb
+        .from("incomes")
+        .select("source_label")
+        .not("source_label", "is", null)
+        .order("created_at", { ascending: false })
+        .limit(200),
+    ]);
+    const error = portfolios.error ?? labels.error;
+    return done(
+      error
+        ? dbFail(error)
+        : json({
+            portfolios: portfolios.data ?? [],
+            source_labels: distinctLabels(
+              (labels.data ?? []).map((r) => r.source_label),
+            ),
+          }),
+    );
   }
 
   if (route === "/incomes" && method === "POST") {
@@ -173,6 +197,9 @@ export async function localLedger(
       _source_name: body.source_name ?? null,
       _description: body.description ?? null,
       _is_recurring: body.is_recurring === true,
+      // Only ever set alongside source='other' — the DB check constraint and
+      // the RPC both reject it on any other source.
+      _source_label: body.source_label ?? null,
     });
     return done(error ? dbFail(error) : json({ income: data }, 201));
   }

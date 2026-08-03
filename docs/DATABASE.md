@@ -71,6 +71,25 @@ Run order in the Supabase SQL Editor:
     the actor for inserts/updates/deletes on every financial table, into an append-only `audit_log`
     (admin-only read, no write policy — tamper-resistant).
 
+11. **User-supplied options, two mechanisms.** The three "pick from a list" fields let people enter
+    something the list doesn't have, but they are not the same kind of list underneath:
+
+    - **Expense category** is a per-user table (`expense_categories`), so an invented category is a
+      real row. `create_expense()` find-or-creates it (matched on `lower(name)` among active rows,
+      the way `uq_expense_cat_user_active_name` is indexed) inside the same transaction as the
+      expense — so a category can't survive an expense that failed a later guard.
+    - **Account category** (`portfolio_category`) and **income source** (`income_source`) are
+      **enums**, and they cannot grow members: `portfolios.is_liquid` is a stored generated column
+      over `category`, and `v_expense_by_category` plus the dashboard allocation split group by
+      both. So the enum keeps its meanings and a nullable `category_label` / `source_label` rides
+      alongside it, **pinned by a check constraint to the catch-all member** (`others` / `other`).
+      Rollups are unaffected — a custom account still aggregates as Others; only the label a person
+      reads changes. The pinning is what stops a stale name surviving a re-categorisation.
+
+    Consequence worth knowing: a custom account category is `others`, so it is **never liquid**
+    (Rule 16 counts cash and savings banks). Naming an account "Petty cash" does not make it count
+    toward liquid money — pick the Cash category for that.
+
 ## Requirement & rule coverage
 
 All 20 business requirements and 21 business rules were mapped to concrete tables/features. A few

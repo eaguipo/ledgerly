@@ -5,7 +5,12 @@ import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { dbError, startTimer } from "@/lib/logger";
 import { requestLogger } from "@/lib/request-context";
-import { CATEGORY_VALUES } from "./constants";
+import { CATEGORY_VALUES, CUSTOM_PORTFOLIO_CATEGORY } from "./constants";
+import {
+  CUSTOM_CHOICE,
+  MAX_CUSTOM_LABEL,
+  normalizeCustomLabel,
+} from "@/lib/custom-choice";
 
 /**
  * Portfolio (account) Server Actions. All writes go through the anon-key server
@@ -36,6 +41,9 @@ export type PortfolioFormState =
 interface ParsedForm {
   name: string;
   category: string;
+  /** Non-null only when the user named their own category. */
+  categoryLabel: string | null;
+  isCustomCategory: boolean;
   currency_id: string;
   openingBalance: number;
   is_savings: boolean;
@@ -43,9 +51,21 @@ interface ParsedForm {
 }
 
 function parseForm(formData: FormData): ParsedForm {
+  // A named category is stored as the enum's catch-all member plus the name;
+  // `portfolio_category` can't grow members, and is_liquid is generated from it.
+  const rawCategory = String(formData.get("category") ?? "");
+  const isCustomCategory = rawCategory === CUSTOM_CHOICE;
+
   return {
     name: String(formData.get("name") ?? "").trim(),
-    category: String(formData.get("category") ?? ""),
+    category: isCustomCategory ? CUSTOM_PORTFOLIO_CATEGORY : rawCategory,
+    // Always null when the picker is back on a listed category — an edit that
+    // moves an account off its custom name has to clear the name with it, or
+    // portfolio_category_label_only_others rejects the update.
+    categoryLabel: isCustomCategory
+      ? normalizeCustomLabel(formData.get("category_label"))
+      : null,
+    isCustomCategory,
     currency_id: String(formData.get("currency_id") ?? ""),
     openingBalance: Number(String(formData.get("opening_balance") ?? "0").trim() || "0"),
     is_savings: formData.get("is_savings") === "on",
@@ -53,9 +73,21 @@ function parseForm(formData: FormData): ParsedForm {
   };
 }
 
+/** Category rules, shared by create and update — both write the same column. */
+function validateCategory(f: ParsedForm): string | null {
+  if (!CATEGORY_VALUES.includes(f.category)) return "Pick a valid category.";
+  if (f.isCustomCategory) {
+    if (!f.categoryLabel) return "Name your category.";
+    if (f.categoryLabel.length > MAX_CUSTOM_LABEL)
+      return `Category name must be ${MAX_CUSTOM_LABEL} characters or fewer.`;
+  }
+  return null;
+}
+
 function validate(f: ParsedForm): string | null {
   if (!f.name) return "Account name is required.";
-  if (!CATEGORY_VALUES.includes(f.category)) return "Pick a valid category.";
+  const category = validateCategory(f);
+  if (category) return category;
   if (!f.currency_id) return "Pick a currency.";
   return null;
 }
@@ -64,6 +96,9 @@ function validate(f: ParsedForm): string | null {
 function formFields(f: ParsedForm) {
   return {
     category: f.category,
+    // Not private detail — it is the name this account will show in the list,
+    // and it is the only thing distinguishing one 'others' account from another.
+    categoryLabel: f.categoryLabel,
     currencyId: f.currency_id,
     openingBalance: f.openingBalance,
     isSavings: f.is_savings,
@@ -118,6 +153,7 @@ export async function createPortfolio(
       user_id: user.id,
       name: f.name,
       category: f.category,
+      category_label: f.categoryLabel,
       currency_id: f.currency_id,
       opening_balance: f.openingBalance,
       is_savings: f.is_savings,
@@ -223,14 +259,17 @@ export async function updatePortfolio(
     });
     return { status: "error", message: "Account name is required." };
   }
-  if (!CATEGORY_VALUES.includes(f.category)) {
+  const badCategory = validateCategory(f);
+  if (badCategory) {
     log.warn("portfolio.update.invalid", {
       portfolioId: id,
       field: "category",
       category: f.category,
+      categoryLabel: f.categoryLabel,
+      message: badCategory,
       durationMs: elapsed(),
     });
-    return { status: "error", message: "Pick a valid category." };
+    return { status: "error", message: badCategory };
   }
 
   const supabase = await createClient();
@@ -252,6 +291,7 @@ export async function updatePortfolio(
       {
         name: f.name,
         category: f.category,
+        category_label: f.categoryLabel,
         is_savings: f.is_savings,
         institution: f.institution || null,
       },
