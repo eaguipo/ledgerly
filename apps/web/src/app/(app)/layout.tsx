@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { signout } from "@/lib/auth/actions";
@@ -27,8 +28,17 @@ export default async function AppLayout({
     <div className="flex flex-1 flex-col lg:flex-row">
       {/* Desktop sidebar */}
       <aside className="sticky top-0 hidden h-dvh w-60 shrink-0 flex-col border-r border-line px-3 py-5 lg:flex">
+        {/* Home for a signed-in user is the dashboard, not "/" — the landing
+            page is for people who are not signed in. Wrapped here rather than
+            inside Wordmark because the auth pages and the 404 render the same
+            lockup, and neither should send you somewhere that redirects. */}
         <div className="px-2 pb-6">
-          <Wordmark />
+          <Link
+            href="/dashboard"
+            className="inline-flex rounded-xl transition-opacity hover:opacity-80"
+          >
+            <Wordmark />
+          </Link>
         </div>
 
         <SidebarLinks />
@@ -59,12 +69,15 @@ export default async function AppLayout({
           compiles without alpha in Tailwind v4, so backdrop-blur would cost
           GPU for no visible frost. */}
       <header className="sticky top-0 z-40 flex items-center justify-between border-b border-line bg-canvas px-4 py-3 lg:hidden">
-        <span className="flex items-center gap-2.5">
+        <Link
+          href="/dashboard"
+          className="flex items-center gap-2.5 rounded-xl transition-opacity hover:opacity-80"
+        >
           <Logo size={30} />
           <span className="text-[18px] font-semibold tracking-tight">
             Ledger<span className="text-accent">ly</span>
           </span>
-        </span>
+        </Link>
         <div className="flex items-center gap-1">
           <ThemeToggle />
           <form action={signout}>
