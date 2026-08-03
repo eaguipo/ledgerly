@@ -48,6 +48,14 @@ interface DebtSummaryRow {
   due_date: string | null;
 }
 
+/** Only the fields the headline goal figures need — see the query below. */
+interface GoalSummaryRow {
+  target_amount: number | string;
+  current_amount: number | string;
+  currency_id: string;
+  status: string;
+}
+
 function one<T>(v: T | T[] | null | undefined): T | undefined {
   return (Array.isArray(v) ? v[0] : v) ?? undefined;
 }
@@ -144,6 +152,7 @@ export default async function DashboardPage() {
     { data: profile, error: profileError },
     { data: portfolios, error: portfoliosError },
     { data: debts, error: debtsError },
+    { data: goals, error: goalsError },
   ] = await Promise.all([
     supabase
       .from("profiles")
@@ -164,6 +173,12 @@ export default async function DashboardPage() {
       .select("kind, outstanding_balance, currency_id, due_date")
       .eq("is_archived", false)
       .in("status", ["open", "partially_paid"]),
+    // Archived and cancelled goals are excluded: neither is something the user
+    // is still working toward, so neither belongs in a progress figure.
+    supabase
+      .from("goals")
+      .select("target_amount, current_amount, currency_id, status")
+      .in("status", ["active", "achieved"]),
   ]);
 
   // These queries discard their errors into an empty render. Logging them is the
@@ -181,6 +196,9 @@ export default async function DashboardPage() {
     // Not fatal — the debt card just doesn't render — but silently dropping it
     // reads as "I have no debts", which is the wrong thing to believe.
     pageLog.error("dashboard.debts.load_failed", dbError(debtsError));
+  }
+  if (goalsError) {
+    pageLog.error("dashboard.goals.load_failed", dbError(goalsError));
   }
 
   const rows = (portfolios ?? []) as unknown as PortfolioRow[];
@@ -325,6 +343,21 @@ export default async function DashboardPage() {
   ).length;
   const hasDebts = debtRows.length > 0;
 
+  // Goals, same primary-currency restriction as the debt figures above. Set
+  // aside is an earmark, not a balance — nothing in these numbers has moved.
+  const goalRows = (goals ?? []) as unknown as GoalSummaryRow[];
+  const primaryGoals = goalRows.filter((g) => g.currency_id === primaryId);
+  const setAside = primaryGoals.reduce(
+    (sum, g) => sum + Number(g.current_amount),
+    0,
+  );
+  const goalTarget = primaryGoals.reduce(
+    (sum, g) => sum + Number(g.target_amount),
+    0,
+  );
+  const goalsAchieved = goalRows.filter((g) => g.status === "achieved").length;
+  const hasGoals = goalRows.length > 0;
+
   // The figures actually rendered. When someone reports "my net worth is wrong",
   // this line says what the page computed and from how many inputs — without it
   // the only way to check is to re-run the maths by hand.
@@ -342,6 +375,9 @@ export default async function DashboardPage() {
     debtOwed: owed,
     debtOwedToYou: owedToYou,
     debtsOverdue: overdueCount,
+    liveGoals: goalRows.length,
+    goalsSetAside: setAside,
+    goalsAchieved,
     durationMs: elapsed(),
   });
 
@@ -443,6 +479,42 @@ export default async function DashboardPage() {
                   }
                 >
                   {overdueCount}
+                </p>
+              </li>
+            </ul>
+          </CardBody>
+        </Card>
+      ) : null}
+
+      {hasGoals ? (
+        <Card className="mt-5">
+          <CardHeader
+            title="Goals"
+            description={`Set aside in ${primary.currency.code} — earmarked, not moved`}
+            action={
+              <ButtonLink href="/goals" variant="secondary" size="sm">
+                View all
+              </ButtonLink>
+            }
+          />
+          <CardBody>
+            <ul className="grid gap-4 sm:grid-cols-3">
+              <li>
+                <Eyebrow>Set aside</Eyebrow>
+                <p className="mt-1.5 text-lg font-semibold text-ink">
+                  <Money amount={setAside} currency={primary.currency} />
+                </p>
+              </li>
+              <li>
+                <Eyebrow>Of target</Eyebrow>
+                <p className="mt-1.5 text-lg font-semibold text-ink">
+                  <Money amount={goalTarget} currency={primary.currency} />
+                </p>
+              </li>
+              <li>
+                <Eyebrow>Achieved</Eyebrow>
+                <p className="mt-1.5 text-lg font-semibold text-ink">
+                  {goalsAchieved}
                 </p>
               </li>
             </ul>

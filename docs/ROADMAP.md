@@ -72,8 +72,10 @@ routes and UI, not schema work.
   cannot work from ledger-service, exactly like `do_transfer()` in Phase 2. Ships as a service-role
   `create_debt_payment()` with the guards the original lacks (overpayment, settled, archived).
   Amount takes an optional interest portion; outstanding drops by principal only.
-- **Goals:** target amount, contributions, progress bars; auto-completes when current ≥ target.
-  Contributions are an **earmark** — they never move real cash (that is what Transfers is for).
+- **Goals:** ✅ target amount, contributions, progress bars; auto-completes when current ≥ target.
+  Contributions are an **earmark** — they never move real cash (that is what Transfers is for), so
+  you can earmark more than you hold. The page warns when goals outrun the account backing them
+  rather than blocking it.
 - RLS: already applied to all four tables in `db/policies.sql` — verify, don't re-add. This phase
   adds no new tables.
 - Debts are archived, never hard-deleted: the cascade to `debt_payments` would orphan ledger rows

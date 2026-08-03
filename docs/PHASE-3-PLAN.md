@@ -272,11 +272,27 @@ One addition beyond the plan: `recompute_debt(uuid)` is also called directly by 
 un-write-off, so a debt that was half paid before being written off comes back as `partially_paid`
 rather than `open`.
 
-**PR 3b — Goals**
-1. `create_goal_contribution.sql`.
-2. Ledger routes `/goals*`.
-3. `/goals` page, forms, actions.
-4. Nav entry, dashboard goals summary.
+**PR 3b — Goals** ✅ *built 2026-08-03*
+1. ✅ `create_goal.sql` + `create_goal_contribution.sql`, plus `do_goal` / `do_goal_contribution`
+   appended to `authenticated_entry_points.sql` — **still to be run in the Supabase SQL editor.**
+2. ✅ Ledger routes `/goals*` **and** matching `lib/ledger-local.ts` handlers. PR #8 landed a second
+   transport after this plan was written: `main` on Vercel has no gateway and serves the same paths
+   in-process over RLS. Every ledger feature now has to ship both halves or it works on one deploy
+   and 503s on the other.
+3. ✅ `/goals` page, forms, actions.
+4. ✅ Nav entry, dashboard goals summary.
+
+Three deviations from §5–6 as planned, all deliberate:
+
+- **`create_goal` was added**, which the plan did not call for. Goals looked like a plain insert
+  until the linked account had to be currency-checked against the goal; putting that in an RPC
+  keeps one implementation instead of one per transport.
+- **No `DELETE /goals/:id`.** The plan allowed deleting a goal with zero contributions. Dropped:
+  the fire-and-forget form actions this codebase uses have no way to surface the 409 for a goal
+  that turns out to have history, so the button would fail silently. Archive and cancel are both
+  reversible and match how portfolios and debts already behave.
+- **`linked_portfolio_id` is not patchable.** Re-pointing a goal needs the same currency check as
+  creating one, and `create_goal` is where that check lives.
 
 ## 9. Verification
 

@@ -73,7 +73,17 @@ function DebtsIcon({ className }: IconProps) {
   );
 }
 
-// Ordered by how money actually moves: where it sits, in, out, between, owed.
+function GoalsIcon({ className }: IconProps) {
+  return (
+    <svg {...stroke} className={className} aria-hidden>
+      <circle cx="12" cy="12" r="8" />
+      <circle cx="12" cy="12" r="3.25" />
+    </svg>
+  );
+}
+
+// Ordered by how money actually moves: where it sits, in, out, between, owed,
+// then what it is being saved toward.
 export const NAV_ITEMS = [
   { href: "/dashboard", label: "Dashboard", Icon: DashboardIcon },
   { href: "/portfolios", label: "Portfolios", Icon: PortfoliosIcon },
@@ -81,4 +91,5 @@ export const NAV_ITEMS = [
   { href: "/expenses", label: "Expenses", Icon: ExpensesIcon },
   { href: "/transfers", label: "Transfers", Icon: TransfersIcon },
   { href: "/debts", label: "Debts", Icon: DebtsIcon },
+  { href: "/goals", label: "Goals", Icon: GoalsIcon },
 ] as const;

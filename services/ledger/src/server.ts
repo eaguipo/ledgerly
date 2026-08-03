@@ -1232,6 +1232,371 @@ app.post("/debts/:id/payments", async (req, reply) => {
   return reply.code(201).send({ payment: data });
 });
 
+// ---------------------------------------------------------------------------
+// GOALS (Phase 3)
+//
+// Goals move no money (decision D2) — a contribution is an earmark over
+// balances you already hold, so nothing here posts a ledger row. The routes are
+// still service-side rather than direct table writes from the web tier because
+// create_goal / create_goal_contribution hold validation the UI must not be the
+// only place enforcing: the linked account's currency, and the over-withdrawal
+// guard that keeps current_amount reconcilable with its contribution rows.
+// ---------------------------------------------------------------------------
+
+// goals has exactly one FK to portfolios, but the column hint costs nothing and
+// survives someone adding a second one later.
+const GOAL_SELECT =
+  "id, name, target_amount, current_amount, currency_id, linked_portfolio_id, " +
+  "status, target_date, achieved_at, first_achieved_at, created_at, " +
+  "currency:currencies(code, symbol, minor_unit), " +
+  "linked_portfolio:portfolios!linked_portfolio_id(name, current_balance)";
+
+// 'achieved' is absent on purpose: refresh_goal_status() derives it from
+// current_amount vs target_amount, and a hand-set value would be overwritten by
+// the next contribution while misreporting progress until then.
+const USER_SETTABLE_GOAL_STATUSES = new Set(["active", "archived", "cancelled"]);
+
+/** Goals for the current user, newest first. */
+app.get("/goals", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+  const q = req.query as { include_archived?: string; limit?: string };
+  const limit = Math.min(Math.max(Number(q.limit) || 100, 1), 200);
+  const includeArchived = q.include_archived === "true";
+  const startedAt = process.hrtime.bigint();
+
+  let query = admin()
+    .from("goals")
+    .select(GOAL_SELECT)
+    .eq("user_id", userId) // service-role bypasses RLS — this is the boundary
+    .limit(limit);
+
+  // Cancelled goals hide with archived ones: both mean "not something I'm
+  // working toward", and neither should pad the list of live goals.
+  if (!includeArchived) query = query.not("status", "in", "(archived,cancelled)");
+
+  const { data, error } = await query.order("created_at", { ascending: false });
+
+  if (error) {
+    req.log.error(
+      { userId, limit, dbMs: since(startedAt), ...dbErrorFields(error) },
+      "ledger.goals.list_failed",
+    );
+    return reply.code(500).send({ error: error.message });
+  }
+
+  req.log.debug(
+    { userId, limit, returned: data?.length ?? 0, dbMs: since(startedAt) },
+    "ledger.goals.list_ok",
+  );
+  return { goals: data ?? [] };
+});
+
+// Form options: active accounts (to link a goal to) and the currency list.
+// Identical shape to /debts/options — the goal form needs the same two lists.
+app.get("/goals/options", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+  const startedAt = process.hrtime.bigint();
+
+  const [portfolios, currencies] = await Promise.all([
+    activePortfolios(userId),
+    admin()
+      .from("currencies")
+      .select("id, code, symbol, minor_unit")
+      .eq("is_active", true)
+      .order("code"),
+  ]);
+
+  if (portfolios.error || currencies.error) {
+    const error = portfolios.error ?? currencies.error;
+    req.log.error(
+      {
+        userId,
+        failed: portfolios.error ? "portfolios" : "currencies",
+        dbMs: since(startedAt),
+        ...dbErrorFields(error),
+      },
+      "ledger.goals.options_failed",
+    );
+    return reply.code(500).send({ error: error?.message });
+  }
+
+  req.log.debug(
+    {
+      userId,
+      portfolios: portfolios.data?.length ?? 0,
+      currencies: currencies.data?.length ?? 0,
+      dbMs: since(startedAt),
+    },
+    "ledger.goals.options_ok",
+  );
+  return {
+    portfolios: portfolios.data ?? [],
+    currencies: currencies.data ?? [],
+  };
+});
+
+// Create a goal via the create_goal RPC.
+app.post("/goals", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+
+  const b = (req.body ?? {}) as Record<string, unknown>;
+  const name = String(b.name ?? "").trim();
+  const target = Number(b.target_amount);
+  const currencyId = String(b.currency_id ?? "");
+  const targetDate = b.target_date ? String(b.target_date) : null;
+  const linkedPortfolio = b.linked_portfolio_id ? String(b.linked_portfolio_id) : null;
+
+  // The goal's name is the user's own wording — presence and length only.
+  req.log.debug(
+    {
+      userId,
+      nameLength: name.length,
+      target,
+      currencyId,
+      targetDate,
+      linked: linkedPortfolio !== null,
+    },
+    "ledger.goal.create_start",
+  );
+
+  const invalid = (field: string, message: string) => {
+    req.log.warn(
+      { userId, field, target, currencyId, targetDate },
+      "ledger.goal.create_invalid",
+    );
+    return reply.code(400).send({ error: message });
+  };
+
+  if (!name) return invalid("name", "Give the goal a name.");
+  if (!Number.isFinite(target) || target <= 0)
+    return invalid("target_amount", "Target must be greater than zero.");
+  if (!UUID_RE.test(currencyId)) return invalid("currency_id", "Select a currency.");
+  if (targetDate !== null && !/^\d{4}-\d{2}-\d{2}$/.test(targetDate))
+    return invalid("target_date", "Target date is not a valid date.");
+  if (linkedPortfolio !== null && !UUID_RE.test(linkedPortfolio))
+    return invalid("linked_portfolio_id", "Select a valid account.");
+
+  const startedAt = process.hrtime.bigint();
+  const { data, error } = await admin().rpc("create_goal", {
+    _user_id: userId,
+    _name: name,
+    _target: target,
+    _currency_id: currencyId,
+    _target_date: targetDate,
+    _linked_portfolio: linkedPortfolio,
+  });
+
+  if (error) {
+    req.log.warn(
+      {
+        userId,
+        target,
+        currencyId,
+        linked: linkedPortfolio !== null,
+        dbMs: since(startedAt),
+        ...dbErrorFields(error),
+      },
+      "ledger.goal.create_rejected",
+    );
+    return reply.code(400).send({ error: error.message });
+  }
+
+  const created = (data ?? {}) as { goal_id?: string };
+  req.log.info(
+    {
+      userId,
+      goalId: created.goal_id,
+      target,
+      currencyId,
+      targetDate,
+      linked: linkedPortfolio !== null,
+      dbMs: since(startedAt),
+    },
+    "ledger.goal.create_ok",
+  );
+  return reply.code(201).send({ goal: data });
+});
+
+// Edit a goal's name, target, target date or status.
+//
+// linked_portfolio_id is deliberately NOT patchable: changing it has to re-check
+// that the account holds the goal's currency, and create_goal is the one place
+// that check lives. Re-pointing a goal means making a new one for now.
+//
+// No DELETE either. Goals archive or cancel, like portfolios and debts archive —
+// keeping the contribution history is the whole point of first_achieved_at
+// surviving a later withdrawal.
+app.patch("/goals/:id", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+  const { id } = req.params as { id: string };
+  if (!UUID_RE.test(id)) return reply.code(400).send({ error: "Invalid goal id." });
+
+  const b = (req.body ?? {}) as Record<string, unknown>;
+  const patch: Record<string, unknown> = {};
+
+  const invalid = (field: string, message: string) => {
+    req.log.warn({ userId, goalId: id, field }, "ledger.goal.update_invalid");
+    return reply.code(400).send({ error: message });
+  };
+
+  if (b.name !== undefined) {
+    const name = String(b.name).trim();
+    if (!name) return invalid("name", "Give the goal a name.");
+    patch.name = name;
+  }
+  if (b.target_amount !== undefined) {
+    const target = Number(b.target_amount);
+    if (!Number.isFinite(target) || target <= 0)
+      return invalid("target_amount", "Target must be greater than zero.");
+    // trg_goal_status re-evaluates achievement on this update, so lowering the
+    // target below what is already set aside completes the goal, and raising it
+    // above demotes it back to active. Both are correct and automatic.
+    patch.target_amount = target;
+  }
+  if (b.target_date !== undefined) {
+    const targetDate =
+      b.target_date === null || b.target_date === "" ? null : String(b.target_date);
+    if (targetDate !== null && !/^\d{4}-\d{2}-\d{2}$/.test(targetDate))
+      return invalid("target_date", "Target date is not a valid date.");
+    patch.target_date = targetDate;
+  }
+  if (b.status !== undefined) {
+    const status = String(b.status);
+    if (!USER_SETTABLE_GOAL_STATUSES.has(status))
+      return invalid("status", "A goal can only be reopened, archived or cancelled.");
+    // Reopening a goal that is already at its target lands on 'active' here and
+    // trg_goal_status immediately corrects it back to 'achieved'. Self-healing,
+    // so there is nothing to special-case the way un-writing-off a debt needs.
+    patch.status = status;
+  }
+
+  if (Object.keys(patch).length === 0) return invalid("body", "Nothing to update.");
+
+  const startedAt = process.hrtime.bigint();
+  const { data, error } = await admin()
+    .from("goals")
+    .update(patch)
+    .eq("user_id", userId)
+    .eq("id", id)
+    .select(GOAL_SELECT)
+    .maybeSingle();
+
+  if (error) {
+    req.log.warn(
+      {
+        userId,
+        goalId: id,
+        fields: Object.keys(patch),
+        dbMs: since(startedAt),
+        ...dbErrorFields(error),
+      },
+      "ledger.goal.update_rejected",
+    );
+    return reply.code(400).send({ error: error.message });
+  }
+  if (!data) {
+    req.log.warn({ userId, goalId: id }, "ledger.goal.update_not_found");
+    return reply.code(404).send({ error: "Goal not found." });
+  }
+
+  req.log.info(
+    {
+      userId,
+      goalId: id,
+      fields: Object.keys(patch),
+      statusAfter: statusOf(data),
+      dbMs: since(startedAt),
+    },
+    "ledger.goal.update_ok",
+  );
+  return { goal: data };
+});
+
+// Set money aside toward a goal, or take it back (a negative amount).
+app.post("/goals/:id/contributions", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+  const { id } = req.params as { id: string };
+  if (!UUID_RE.test(id)) return reply.code(400).send({ error: "Invalid goal id." });
+
+  const b = (req.body ?? {}) as Record<string, unknown>;
+  const amount = Number(b.amount);
+  const contributedOn = String(b.contributed_on ?? "");
+  const note = b.note ? String(b.note) : null;
+
+  req.log.debug(
+    { userId, goalId: id, amount, contributedOn, hasNote: note !== null },
+    "ledger.goal_contribution.create_start",
+  );
+
+  const invalid = (field: string, message: string) => {
+    req.log.warn(
+      { userId, goalId: id, field, amount, contributedOn },
+      "ledger.goal_contribution.create_invalid",
+    );
+    return reply.code(400).send({ error: message });
+  };
+
+  // Zero is the only forbidden amount — negative is how you take money back out.
+  if (!Number.isFinite(amount) || amount === 0)
+    return invalid("amount", "Enter an amount to set aside or take back.");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(contributedOn))
+    return invalid("contributed_on", "Date is required.");
+
+  const startedAt = process.hrtime.bigint();
+  const { data, error } = await admin().rpc("create_goal_contribution", {
+    _user_id: userId,
+    _goal_id: id,
+    _amount: amount,
+    _contributed_on: contributedOn,
+    _note: note,
+  });
+
+  if (error) {
+    // Over-withdrawal and archived/cancelled goals both land here as P0001
+    // raises — user-facing guards, hence 400.
+    req.log.warn(
+      {
+        userId,
+        goalId: id,
+        amount,
+        contributedOn,
+        dbMs: since(startedAt),
+        ...dbErrorFields(error),
+      },
+      "ledger.goal_contribution.create_rejected",
+    );
+    return reply.code(400).send({ error: error.message });
+  }
+
+  const created = (data ?? {}) as {
+    contribution_id?: string;
+    current_amount?: string;
+    status?: string;
+    just_achieved?: boolean;
+  };
+
+  req.log.info(
+    {
+      userId,
+      goalId: id,
+      contributionId: created.contribution_id,
+      amount,
+      contributedOn,
+      currentAfter: created.current_amount,
+      statusAfter: created.status,
+      justAchieved: created.just_achieved ?? false,
+      dbMs: since(startedAt),
+    },
+    "ledger.goal_contribution.create_ok",
+  );
+  return reply.code(201).send({ contribution: data });
+});
+
 installProcessLogging(app);
 
 app
