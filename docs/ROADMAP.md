@@ -112,6 +112,14 @@ totals correctly grouped by currency.
 **Goal:** the date-range reports and financial-summary dashboard the client asked for. Mostly
 read-only aggregation over data you already have.
 
+**Full plan (decisions, views, edge cases): [`docs/PHASE-5-PLAN.md`](./PHASE-5-PLAN.md).** The first
+phase with no plumbing: no new tables, no money RPCs, and **no dual-transport work** — reports read
+`security_invoker` views through the RLS client the way `/dashboard` already does. Two things the
+plan changes from the outline below: charts stay hand-rolled rather than adding Recharts (the app has
+no UI dependencies and already ships two accessible SVG charts), and **the parked "Money Invested"
+fix must land first** — until it does, buying an asset counts as spending and every figure here
+inherits that error.
+
 - **Date-range report (Rule 15):** start/end pickers showing only in-range transactions — incoming
   cash, all expenses, total inflow, total outflow, net.
 - **Summaries:** liquid money by currency; investment accounts + balances; remaining debt + payments
