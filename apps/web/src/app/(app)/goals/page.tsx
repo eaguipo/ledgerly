@@ -7,7 +7,7 @@ import { startTimer } from "@/lib/logger";
 import { requestLogger } from "@/lib/request-context";
 import { GoalForm } from "./goal-form";
 import { ContributionForm } from "./contribution-form";
-import { archiveGoal, cancelGoal, reopenGoal } from "./actions";
+import { createGoal, archiveGoal, cancelGoal, reopenGoal } from "./actions";
 import {
   formatDate,
   goalStatusLabel,
@@ -24,7 +24,7 @@ import type {
   GoalRow,
 } from "./types";
 import { PageContainer, PageHeader } from "@/components/shell/page-header";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonLink } from "@/components/ui/button";
 import { Card, CardBody, CardHeader, Eyebrow } from "@/components/ui/card";
 import { Alert, Badge, EmptyState } from "@/components/ui/feedback";
 import { Money } from "@/components/ui/money";
@@ -175,7 +175,10 @@ function GoalCard({ goal, today }: { goal: GoalRow; today: string }) {
           </p>
         )}
 
-        <div className="flex flex-wrap gap-2 border-t border-line pt-3">
+        <div className="flex flex-wrap items-center gap-2 border-t border-line pt-3">
+          <ButtonLink href={`/goals/${goal.id}`} size="sm">
+            Edit
+          </ButtonLink>
           {isLiveGoal(goal.status) ? (
             <>
               <ActionButton id={goal.id} action={archiveGoal} label="Archive" />
@@ -391,9 +394,12 @@ export default async function GoalsPage({
               </p>
             ) : (
               <GoalForm
+                mode="create"
+                action={createGoal}
                 accounts={accounts}
                 currencies={currencies}
                 defaultCurrencyId={profile?.default_currency_id ?? undefined}
+                submitLabel="Create goal"
               />
             )}
           </CardBody>

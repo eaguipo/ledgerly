@@ -30,3 +30,22 @@ export function formatMoney(
   const prefix = currency?.symbol || (currency?.code ? `${currency.code} ` : "");
   return `${sign}${prefix}${num}`;
 }
+
+/**
+ * An amount as `<input type="number">` wants it: no symbol, no grouping, and no
+ * trailing zeros.
+ *
+ * Money is `numeric(38,18)`, so PostgREST hands back "150.000000000000000000"
+ * and an edit form would open showing that. Trimmed as a STRING rather than via
+ * `Number(v)` — quantities are numeric(28,8) and cost bases can carry more
+ * significant digits than a float holds, and silently rounding a value the user
+ * did not touch is exactly the bug an edit form must not have.
+ */
+export function amountInputValue(
+  value: number | string | null | undefined,
+): string {
+  if (value === null || value === undefined || value === "") return "";
+  const s = String(value);
+  if (!s.includes(".")) return s;
+  return s.replace(/0+$/, "").replace(/\.$/, "");
+}

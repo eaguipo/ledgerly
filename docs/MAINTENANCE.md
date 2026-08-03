@@ -102,9 +102,15 @@ personal-finance-tracker/
     │                                   do_goal_contribution/do_investment/
     │                                   do_investment_snapshot — the RLS-path wrappers
     │                                   the Vercel deploy writes through
-    └── custom_option_labels.sql    user-supplied options: the two label columns,
-                                    plus create_expense/create_income/do_expense/
-                                    do_income re-created with one more parameter
+    ├── custom_option_labels.sql    user-supplied options: the two label columns,
+    │                               plus create_expense/create_income/do_expense/
+    │                               do_income re-created with one more parameter
+    └── edit_and_delete_entries.sql correcting and removing entries: update_expense/
+                                    delete_expense/update_income/delete_income/
+                                    update_investment/delete_investment and their
+                                    do_* wrappers. The ledger stays append-only —
+                                    a money-changing edit REPLACES its transaction
+                                    rather than mutating it (§3, invariant 14)
 ```
 
 Two kinds of file live in `db/functions/`, and they behave differently:
@@ -121,9 +127,11 @@ Two kinds of file live in `db/functions/`, and they behave differently:
 
 Apply order matters: `create_debt.sql` before `cashflow_excludes_debt_origination.sql` (which
 references the `loan_received` enum value it adds), **every** `create_*` file before
-`authenticated_entry_points.sql` (which delegates to them all), and
-`custom_option_labels.sql` **last** — it drops and re-creates four of the functions those two
-files define, so anything applied after it would put the old signatures back.
+`authenticated_entry_points.sql` (which delegates to them all),
+`custom_option_labels.sql` after those — it drops and re-creates four of the functions those two
+files define, so re-applying any of *those four* after it would put the old signatures back — and
+`edit_and_delete_entries.sql` **last**, since it reads two columns earlier files add. That last one
+re-creates nothing, so it imposes no ordering on anything applied after it.
 
 ---
 
@@ -340,14 +348,28 @@ Treat this as the review checklist for every change.
 11. A transaction's `currency_id` always equals its portfolio's.
 12. Transfers stay excluded from inflow/outflow reporting (`v_cashflow` filters `kind`).
 13. Deleting user-facing reference data soft-deletes; history never disappears.
+14. **A ledger row is never mutated in place.** `trg_txn_immutable` rejects any change to a
+    transaction's portfolio, kind, direction, amount, currency or date — `description` is the one
+    editable column, and that is deliberate. Correcting an amount or a date therefore REPLACES the
+    row: void → insert the replacement → repoint the detail row → delete the old one, all inside one
+    SQL function (`db/functions/edit_and_delete_entries.sql`). **Void before insert**, or raising an
+    expense from 100 to 120 on an account holding exactly 100 is refused for insufficient funds
+    while both rows are briefly live.
+15. A detail row that carries `debt_id` or `investment_id` is another feature's ledger leg, not an
+    ordinary expense or income. `update_*`/`delete_*` refuse them, the lists withhold their Edit
+    links, and the edit pages redirect to the owning debt or holding. Anything new that writes an
+    expense on another feature's behalf must set one of those two columns.
+16. Deleting an investment deletes its purchase leg too. `expenses.investment_id` is
+    `on delete set null` and both report views exclude asset purchases by exactly that column, so a
+    leg left behind silently becomes ordinary spending.
 
 **Operational**
 
-14. `apps/web/.env.local` is the single source of truth for local secrets. Values files hold
+17. `apps/web/.env.local` is the single source of truth for local secrets. Values files hold
     placeholders only; `values.local.yaml` is gitignored.
-15. After editing `deploy/helm/charts/service`, run `make helm-deps` before deploying.
-16. Node 20 for every JS workspace.
-17. Before writing Next.js-specific code, read the bundled docs in
+18. After editing `deploy/helm/charts/service`, run `make helm-deps` before deploying.
+19. Node 20 for every JS workspace.
+20. Before writing Next.js-specific code, read the bundled docs in
     `apps/web/node_modules/next/dist/docs/` — Next 16 differs from what you remember (see §7).
 
 ---
