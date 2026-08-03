@@ -20,6 +20,7 @@ import { idleDelete, type DeleteState } from "@/lib/delete-state";
 export function ConfirmDelete({
   action,
   id,
+  extra,
   label = "Delete",
   confirmLabel = "Yes, delete",
   question = "Delete this permanently?",
@@ -27,6 +28,12 @@ export function ConfirmDelete({
 }: {
   action: (state: DeleteState, formData: FormData) => Promise<DeleteState>;
   id: string;
+  /**
+   * Extra hidden fields the action needs alongside the id — a debt adjustment,
+   * for instance, redirects back to its parent debt and cannot work that out
+   * from the adjustment id alone.
+   */
+  extra?: Record<string, string>;
   label?: string;
   /** The button that actually deletes, once armed. */
   confirmLabel?: string;
@@ -45,6 +52,9 @@ export function ConfirmDelete({
       {armed ? (
         <form action={formAction} className="flex flex-wrap items-center gap-2">
           <input type="hidden" name="id" value={id} />
+          {Object.entries(extra ?? {}).map(([name, value]) => (
+            <input key={name} type="hidden" name={name} value={value} />
+          ))}
           <span className="text-[13px] text-muted">{question}</span>
           <Button
             type="submit"

@@ -35,6 +35,60 @@ export function debtKind(value: string) {
   return DEBT_KINDS.find((k) => k.value === value) ?? DEBT_KINDS[0];
 }
 
+/**
+ * Reasons a debt's balance can change without any cash moving, mirrored from
+ * db public.debt_adjustment_reason.
+ *
+ * `grows` is not decoration — the DB pins the sign to the reason (a check
+ * constraint plus a guard in create_debt_adjustment), so the form has to know
+ * which way each one points and send the amount signed accordingly. 'correction'
+ * is the only one that takes either sign, which is why it carries null.
+ */
+export const ADJUSTMENT_REASONS = [
+  {
+    value: "interest",
+    label: "Interest accrued",
+    grows: true,
+    hint: "Interest added to what's owed. Nothing accrues on its own — record it when a statement arrives.",
+  },
+  {
+    value: "fee",
+    label: "Fee or penalty",
+    grows: true,
+    hint: "A charge added to the debt.",
+  },
+  {
+    value: "payment_off_app",
+    label: "Paid outside this app",
+    grows: false,
+    hint: "Money really changed hands, but not through an account tracked here — so no balance moves.",
+  },
+  {
+    value: "forgiven",
+    label: "Written down / forgiven",
+    grows: false,
+    hint: "Part of the debt was cancelled by agreement. No money changed hands.",
+  },
+  {
+    value: "correction",
+    label: "Correction",
+    grows: null,
+    hint: "The figure was simply wrong. Use + to increase what's owed, − to reduce it.",
+  },
+] as const;
+
+export const ADJUSTMENT_REASON_VALUES: string[] = ADJUSTMENT_REASONS.map(
+  (r) => r.value,
+);
+
+export function adjustmentReason(value: string) {
+  return ADJUSTMENT_REASONS.find((r) => r.value === value) ?? ADJUSTMENT_REASONS[0];
+}
+
+export function adjustmentReasonLabel(value: string): string {
+  return ADJUSTMENT_REASONS.find((r) => r.value === value)?.label ?? value;
+}
+
 export const DEBT_STATUS_LABELS: Record<string, string> = {
   open: "Open",
   partially_paid: "Partly paid",

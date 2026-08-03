@@ -29,19 +29,37 @@ create or replace function public.recompute_debt(_debt_id uuid)
 returns void language plpgsql set search_path = public as $$
 declare
   v_principal      numeric(38,18);
+  v_charges        numeric(38,18);
+  v_credits        numeric(38,18);
+  v_gross          numeric(38,18);
   v_principal_paid numeric(38,18);
+  v_settled        numeric(38,18);
   v_outstanding    numeric(38,18);
   v_new_status     public.debt_status;
 begin
   select principal_amount into v_principal from public.debts where id = _debt_id;
   if v_principal is null then return; end if;
 
+  -- Split by sign rather than summed into one net figure. The sign is what says
+  -- whether the debt GREW (interest, a fee) or was partly SETTLED without cash
+  -- moving here (paid off-app, forgiven) -- and that distinction is the only
+  -- thing separating 'open' from 'partially_paid' below.
+  select coalesce(sum(amount) filter (where amount > 0), 0),
+         coalesce(sum(-amount) filter (where amount < 0), 0)
+    into v_charges, v_credits
+    from public.debt_adjustments where debt_id = _debt_id;
+
+  -- Outstanding is reduced ONLY by principal portions, so paying interest never
+  -- pays down principal (Rule 14). Self-healing recompute-from-sum.
   select coalesce(sum(principal_portion), 0) into v_principal_paid
     from public.debt_payments where debt_id = _debt_id;
 
-  v_outstanding := greatest(v_principal - v_principal_paid, 0);
+  v_gross       := v_principal + v_charges;
+  v_settled     := v_principal_paid + v_credits;
+  v_outstanding := greatest(v_gross - v_settled, 0);
+
   if v_outstanding = 0 then v_new_status := 'settled';
-  elsif v_outstanding < v_principal then v_new_status := 'partially_paid';
+  elsif v_settled > 0 then v_new_status := 'partially_paid';
   else v_new_status := 'open'; end if;
 
   update public.debts

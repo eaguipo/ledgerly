@@ -41,6 +41,23 @@ export interface DebtPaymentRow {
   } | null;
 }
 
+/**
+ * A cash-free correction to what is owed.
+ *
+ * The absence of a transaction embed is the point: an adjustment records that
+ * the DEBT changed (interest accrued, it was paid outside this app, it was
+ * written down) while no account balance moved. `amount` is signed — positive
+ * grew the debt, negative settled part of it.
+ */
+export interface DebtAdjustmentRow {
+  id: string;
+  amount: number | string;
+  reason: string;
+  effective_on: string;
+  note: string | null;
+  created_at: string;
+}
+
 /** An account usable as a debt's funding or payment source. */
 export interface DebtAccount {
   id: string;

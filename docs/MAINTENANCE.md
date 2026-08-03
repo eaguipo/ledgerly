@@ -105,12 +105,18 @@ personal-finance-tracker/
     ├── custom_option_labels.sql    user-supplied options: the two label columns,
     │                               plus create_expense/create_income/do_expense/
     │                               do_income re-created with one more parameter
-    └── edit_and_delete_entries.sql correcting and removing entries: update_expense/
-                                    delete_expense/update_income/delete_income/
-                                    update_investment/delete_investment and their
-                                    do_* wrappers. The ledger stays append-only —
-                                    a money-changing edit REPLACES its transaction
-                                    rather than mutating it (§3, invariant 14)
+    ├── edit_and_delete_entries.sql correcting and removing entries: update_expense/
+    │                               delete_expense/update_income/delete_income/
+    │                               update_investment/delete_investment and their
+    │                               do_* wrappers. The ledger stays append-only —
+    │                               a money-changing edit REPLACES its transaction
+    │                               rather than mutating it (§3, invariant 14)
+    └── debt_editing_and_adjustments.sql  re-tagging a debt payable <-> receivable
+                                    (update_debt re-posts every ledger leg the
+                                    other way round), plus debt_adjustments — the
+                                    cash-free input that lets outstanding_balance
+                                    be corrected at all. Re-creates
+                                    recompute_debt(); see below
 ```
 
 Two kinds of file live in `db/functions/`, and they behave differently:
@@ -119,11 +125,18 @@ Two kinds of file live in `db/functions/`, and they behave differently:
   knows nothing about them; they are applied by hand after it.
 - **Redefinitions of something `schema.sql` already creates** — currently
   `debt_principal_recompute.sql` (§15c triggers), `cashflow_excludes_debt_origination.sql`
-  (§19 views), the `alter table` half of `custom_option_labels.sql` (§7/§10 columns), and
+  (§19 views), the `alter table` half of `custom_option_labels.sql` (§7/§10 columns),
   `create_investment.sql`, which is both kinds at once: a new RPC *plus* the
-  `investments.kind_label` column (§12) and a re-created `v_investment_performance` (§19).
+  `investments.kind_label` column (§12) and a re-created `v_investment_performance` (§19),
+  and `debt_editing_and_adjustments.sql`, likewise both: new RPCs *plus* the
+  `debt_adjustments` table (§10b) and a re-created `recompute_debt()` (§15c).
   These **must be kept byte-identical to `schema.sql`**, because re-running
   `schema.sql` on a live database would otherwise silently revert them.
+
+  `recompute_debt()` now has **three** copies — `schema.sql` §15c,
+  `debt_principal_recompute.sql`, and `debt_editing_and_adjustments.sql`. If they drift,
+  every adjustment silently stops counting toward `outstanding_balance` and no error is
+  raised anywhere.
 
 Apply order matters: `create_debt.sql` before `cashflow_excludes_debt_origination.sql` (which
 references the `loan_received` enum value it adds), **every** `create_*` file before
@@ -362,14 +375,22 @@ Treat this as the review checklist for every change.
 16. Deleting an investment deletes its purchase leg too. `expenses.investment_id` is
     `on delete set null` and both report views exclude asset purchases by exactly that column, so a
     leg left behind silently becomes ordinary spending.
+17. **`debts.outstanding_balance` is derived, never written directly.** `recompute_debt()` rebuilds
+    it as `principal + charges − payments − credits`, and re-runs on every payment, every
+    adjustment and any principal change — so anything set by hand is overwritten by the next write.
+    To change it, add an input: correct `principal_amount`, or record a `debt_adjustments` row.
+18. `debts.kind` decides the DIRECTION of every ledger row hanging off the debt — a payable's
+    disbursement is cash in and its payments cash out, a receivable's are the reverse. It is
+    therefore only changeable through `update_debt()`, which re-posts every leg. Never write it
+    directly.
 
 **Operational**
 
-17. `apps/web/.env.local` is the single source of truth for local secrets. Values files hold
+19. `apps/web/.env.local` is the single source of truth for local secrets. Values files hold
     placeholders only; `values.local.yaml` is gitignored.
-18. After editing `deploy/helm/charts/service`, run `make helm-deps` before deploying.
-19. Node 20 for every JS workspace.
-20. Before writing Next.js-specific code, read the bundled docs in
+20. After editing `deploy/helm/charts/service`, run `make helm-deps` before deploying.
+21. Node 20 for every JS workspace.
+22. Before writing Next.js-specific code, read the bundled docs in
     `apps/web/node_modules/next/dist/docs/` — Next 16 differs from what you remember (see §7).
 
 ---

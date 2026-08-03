@@ -95,6 +95,11 @@ const DEBT_PAYMENT_SELECT =
   "id, amount, principal_portion, interest_portion, payment_date, note, " +
   "transaction:transactions(id, kind, portfolio:portfolios(name))";
 
+// Cash-free corrections to what is owed. No transaction embed on purpose —
+// having none is exactly what distinguishes an adjustment from a payment.
+const DEBT_ADJUSTMENT_SELECT =
+  "id, amount, reason, effective_on, note, created_at";
+
 const GOAL_SELECT =
   "id, name, target_amount, current_amount, currency_id, linked_portfolio_id, " +
   "status, target_date, achieved_at, first_achieved_at, created_at, " +
@@ -415,43 +420,98 @@ export async function localLedger(
 
   const debtId = route.match(/^\/debts\/([^/]+)$/)?.[1];
   const paymentsFor = route.match(/^\/debts\/([^/]+)\/payments$/)?.[1];
+  const adjustmentsFor = route.match(/^\/debts\/([^/]+)\/adjustments$/)?.[1];
+  const adjustmentId = route.match(/^\/debts\/[^/]+\/adjustments\/([^/]+)$/)?.[1];
 
   if (debtId && method === "GET") {
     if (!UUID_RE.test(debtId)) return done(json({ error: "Invalid debt id." }, 400));
-    const [debt, payments] = await Promise.all([
+    const [debt, payments, adjustments, disbIn, disbOut] = await Promise.all([
       sb.from("debts").select(DEBT_SELECT).eq("id", debtId).maybeSingle(),
       sb.from("debt_payments").select(DEBT_PAYMENT_SELECT).eq("debt_id", debtId)
         .order("payment_date", { ascending: false }),
+      sb.from("debt_adjustments").select(DEBT_ADJUSTMENT_SELECT).eq("debt_id", debtId)
+        .order("effective_on", { ascending: false })
+        .order("created_at", { ascending: false }),
+      // Did this debt post a disbursement? An incomes row for a payable, an
+      // expenses row for a receivable — it decides whether re-tagging moves
+      // money, and nothing else on the response answers it.
+      sb.from("incomes").select("transaction_id").eq("debt_id", debtId).limit(1).maybeSingle(),
+      sb.from("expenses").select("transaction_id").eq("debt_id", debtId).limit(1).maybeSingle(),
     ]);
     const error = debt.error ?? payments.error;
     if (error) return done(dbFail(error));
     if (!debt.data) return done(json({ error: "Debt not found." }, 404));
-    return done(json({ debt: debt.data, payments: payments.data ?? [] }));
+    return done(
+      json({
+        debt: debt.data,
+        payments: payments.data ?? [],
+        adjustments: adjustments.data ?? [],
+        disbursement_transaction_id:
+          disbIn.data?.transaction_id ?? disbOut.data?.transaction_id ?? null,
+      }),
+    );
   }
 
   if (debtId && method === "PATCH") {
     if (!UUID_RE.test(debtId)) return done(json({ error: "Invalid debt id." }, 400));
-    const { data, error } = await sb
-      .from("debts")
-      .update(body)
-      .eq("id", debtId)
-      .select(DEBT_SELECT)
-      .maybeSingle();
-    if (error) return done(dbFail(error));
-    if (!data) return done(json({ error: "Debt not found." }, 404));
-    // Mirrors the ledger route: un-writing-off has to re-derive the status from
-    // the payment history, or a debt with payments reopens as 'open'.
-    if (body.status === "open") {
-      const { error: recErr } = await sb.rpc("recompute_debt", { _debt_id: debtId });
-      if (recErr) {
-        callLog.error("ledger.local.reopen_recompute_failed", { debtId, message: recErr.message });
-      } else {
-        const { data: fresh } = await sb
-          .from("debts").select(DEBT_SELECT).eq("id", debtId).maybeSingle();
-        if (fresh) return done(json({ debt: fresh }));
-      }
+    // Allow-listed and routed through the RPC rather than written straight to
+    // the table. `kind` is why: re-tagging payable <-> receivable has to re-post
+    // every ledger leg in the opposite direction, and a plain
+    // `update debts set kind = …` would leave the ledger contradicting the debt.
+    const PATCHABLE = [
+      "kind",
+      "counterparty",
+      "principal_amount",
+      "interest_rate",
+      "due_date",
+      "note",
+      "is_archived",
+      "status",
+    ] as const;
+    const patch: Record<string, unknown> = {};
+    for (const field of PATCHABLE) {
+      if (body[field] !== undefined) patch[field] = body[field];
     }
-    return done(json({ debt: data }));
+    if (Object.keys(patch).length === 0)
+      return done(json({ error: "Nothing to update." }, 400));
+    const { data, error } = await sb.rpc("do_debt_update", {
+      _debt_id: debtId,
+      _patch: patch,
+    });
+    if (error) return done(dbFail(error));
+    // update_debt() already re-derived the status after an un-write-off, so
+    // unlike the old direct-write version there is no second recompute here.
+    const { data: fresh } = await sb
+      .from("debts").select(DEBT_SELECT).eq("id", debtId).maybeSingle();
+    if (!fresh) return done(json({ error: "Debt not found." }, 404));
+    return done(
+      json({
+        debt: fresh,
+        retagged: (data as { retagged?: boolean } | null)?.retagged ?? false,
+      }),
+    );
+  }
+
+  if (adjustmentsFor && method === "POST") {
+    if (!UUID_RE.test(adjustmentsFor))
+      return done(json({ error: "Invalid debt id." }, 400));
+    const { data, error } = await sb.rpc("do_debt_adjustment", {
+      _debt_id: adjustmentsFor,
+      _amount: body.amount,
+      _reason: body.reason,
+      _effective_on: body.effective_on ?? null,
+      _note: body.note ?? null,
+    });
+    return done(error ? dbFail(error) : json({ adjustment: data }, 201));
+  }
+
+  if (adjustmentId && method === "DELETE") {
+    if (!UUID_RE.test(adjustmentId))
+      return done(json({ error: "Invalid adjustment id." }, 400));
+    const { data, error } = await sb.rpc("do_debt_adjustment_delete", {
+      _adjustment_id: adjustmentId,
+    });
+    return done(error ? dbFail(error) : json({ deleted: data }));
   }
 
   if (paymentsFor && method === "POST") {

@@ -26,6 +26,13 @@ create type public.txn_direction     as enum ('inflow','outflow');
 create type public.income_source     as enum ('salary','business','gains','debt_payment_received','gift','other');
 create type public.debt_kind         as enum ('payable','receivable');
 create type public.debt_status       as enum ('open','partially_paid','settled','written_off');
+-- Why a cash-free line on a debt exists at all: outstanding_balance is derived,
+-- so correcting it means changing an input, and the only cash-free input used to
+-- be the principal — which says "the debt was always this much" and is wrong for
+-- interest, or for a payment made outside the app. See §10b and
+-- db/functions/debt_editing_and_adjustments.sql.
+create type public.debt_adjustment_reason as enum (
+  'interest','fee','payment_off_app','forgiven','correction');
 create type public.goal_status       as enum ('active','achieved','archived','cancelled');
 create type public.investment_kind   as enum ('mp2','crypto','stock','mutual_fund','bond','real_estate','other_asset');
 create type public.audit_action      as enum ('insert','update','delete');
@@ -375,6 +382,39 @@ create index idx_debt_payments_debt on public.debt_payments(debt_id);
 create index idx_debt_payments_user_date on public.debt_payments(user_id, payment_date);
 
 -- ---------------------------------------------------------------------------
+-- 10b. DEBT ADJUSTMENTS — what changed about the debt WITHOUT cash moving.
+--      Interest accruing, a fee, a payment made outside this app, a write-down.
+--      Deliberately NOT a debt_payments row with a null transaction_id: that
+--      column is `not null` + `on delete restrict` on purpose (every payment is
+--      backed by a ledger row), and a payment with no ledger row would render in
+--      the payment history with no account against it.
+--      Mirrored from db/functions/debt_editing_and_adjustments.sql — keep in sync.
+-- ---------------------------------------------------------------------------
+create table public.debt_adjustments (
+  id             uuid primary key default gen_random_uuid(),
+  user_id        uuid not null references public.profiles(id) on delete cascade,
+  debt_id        uuid not null references public.debts(id) on delete cascade,
+  -- SIGNED: positive grows what is owed, negative settles part of it. One column
+  -- rather than an amount plus a direction flag — every consumer wants the net.
+  amount         numeric(38,18) not null,
+  reason         public.debt_adjustment_reason not null,
+  effective_on   date not null default current_date,
+  note           text,
+  created_at     timestamptz not null default now(),
+  constraint debt_adj_nonzero check (amount <> 0),
+  -- Sign and reason must agree, or "-2,500 interest" would read as the debt
+  -- growing while it shrank. This is what keeps recompute_debt()'s
+  -- charges/credits split meaningful.
+  constraint debt_adj_sign_matches_reason check (
+    (reason in ('interest', 'fee') and amount > 0)
+    or (reason in ('payment_off_app', 'forgiven') and amount < 0)
+    or reason = 'correction'
+  )
+);
+create index idx_debt_adj_debt on public.debt_adjustments(debt_id, effective_on);
+create index idx_debt_adj_user on public.debt_adjustments(user_id);
+
+-- ---------------------------------------------------------------------------
 -- 11. GOALS + CONTRIBUTIONS (Rule 18 auto-achieve)
 --     first_achieved_at is set on first completion and NEVER cleared, so
 --     historical achievement (and v_completed_goals) survives later withdrawals.
@@ -614,19 +654,37 @@ create or replace function public.recompute_debt(_debt_id uuid)
 returns void language plpgsql set search_path = public as $$
 declare
   v_principal      numeric(38,18);
+  v_charges        numeric(38,18);
+  v_credits        numeric(38,18);
+  v_gross          numeric(38,18);
   v_principal_paid numeric(38,18);
+  v_settled        numeric(38,18);
   v_outstanding    numeric(38,18);
   v_new_status     public.debt_status;
 begin
   select principal_amount into v_principal from public.debts where id = _debt_id;
   if v_principal is null then return; end if;
 
+  -- Split by sign rather than summed into one net figure. The sign is what says
+  -- whether the debt GREW (interest, a fee) or was partly SETTLED without cash
+  -- moving here (paid off-app, forgiven) -- and that distinction is the only
+  -- thing separating 'open' from 'partially_paid' below.
+  select coalesce(sum(amount) filter (where amount > 0), 0),
+         coalesce(sum(-amount) filter (where amount < 0), 0)
+    into v_charges, v_credits
+    from public.debt_adjustments where debt_id = _debt_id;
+
+  -- Outstanding is reduced ONLY by principal portions, so paying interest never
+  -- pays down principal (Rule 14). Self-healing recompute-from-sum.
   select coalesce(sum(principal_portion), 0) into v_principal_paid
     from public.debt_payments where debt_id = _debt_id;
 
-  v_outstanding := greatest(v_principal - v_principal_paid, 0);
+  v_gross       := v_principal + v_charges;
+  v_settled     := v_principal_paid + v_credits;
+  v_outstanding := greatest(v_gross - v_settled, 0);
+
   if v_outstanding = 0 then v_new_status := 'settled';
-  elsif v_outstanding < v_principal then v_new_status := 'partially_paid';
+  elsif v_settled > 0 then v_new_status := 'partially_paid';
   else v_new_status := 'open'; end if;
 
   update public.debts
@@ -647,6 +705,12 @@ begin
   return coalesce(new, old);
 end $$;
 create trigger trg_debt_payment_recompute after insert or update or delete on public.debt_payments
+  for each row execute function public.recompute_debt_balance();
+
+-- Adjustment-side trigger. debt_adjustments (§10b) carries debt_id, so the same
+-- trigger function works here unchanged — a cash-free line has to re-derive the
+-- outstanding balance exactly as a payment does.
+create trigger trg_debt_adjustment_recompute after insert or update or delete on public.debt_adjustments
   for each row execute function public.recompute_debt_balance();
 
 -- Principal-side trigger: correcting principal_amount has to recompute too, or a
@@ -736,6 +800,7 @@ create trigger trg_audit_transactions  after insert or update or delete on publi
 create trigger trg_audit_portfolios    after insert or update or delete on public.portfolios     for each row execute function public.audit_trigger();
 create trigger trg_audit_debts         after insert or update or delete on public.debts          for each row execute function public.audit_trigger();
 create trigger trg_audit_debt_payments after insert or update or delete on public.debt_payments  for each row execute function public.audit_trigger();
+create trigger trg_audit_debt_adjustments after insert or update or delete on public.debt_adjustments for each row execute function public.audit_trigger();
 create trigger trg_audit_transfers     after insert or update or delete on public.transfers      for each row execute function public.audit_trigger();
 create trigger trg_audit_goals         after insert or update or delete on public.goals          for each row execute function public.audit_trigger();
 create trigger trg_audit_investments   after insert or update or delete on public.investments    for each row execute function public.audit_trigger();
