@@ -205,6 +205,11 @@ Key mechanics:
 - **`portfolios.current_balance` is a trigger-maintained cache** of the ledger, kept by
   `apply_txn_to_balance()`. `reconcile_portfolio_balances()` rebuilds it from the ledger if it ever
   drifts. Reads use the cache; the overdraft guard uses the cache under `SELECT … FOR UPDATE`.
+- **`portfolios.opening_balance` is not authoritative and must never be summed** (DECISIONS-NEEDED
+  #6). A starting balance is an `opening_balance` *ledger row*, posted by `createPortfolio`, and
+  that row is what the cache and the reconcile function derive from. The column is a written-once
+  note of what the account opened at — nothing reads it and no later edit maintains it. Adding it
+  to any balance double-counts the ledger row it duplicates.
 - **Guards fire on `transactions`, not on the API.** `txn_overdraft_guard()` blocks any outflow that
   would push a non-`allow_negative` portfolio below zero, whatever wrote it.
   `txn_enforce_currency()` requires the transaction currency to match the portfolio's.

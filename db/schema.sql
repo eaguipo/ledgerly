@@ -171,6 +171,12 @@ create table public.portfolios (
   category_label  text,
   currency_id     uuid not null references public.currencies(id),
   purpose_tag_id  uuid references public.money_purpose_tags(id) on delete set null,
+  -- NOT AUTHORITATIVE, and never to be summed into anything (DECISIONS-NEEDED
+  -- #6). A starting balance is modelled as an 'opening_balance' LEDGER ROW, and
+  -- that row is what current_balance and reconcile_portfolio_balances() are
+  -- derived from. This column is a written-once note of what the account opened
+  -- at: createPortfolio sets it, nothing reads it, and no later edit maintains
+  -- it. Adding it to a balance would double-count the ledger row.
   opening_balance numeric(38,18) not null default 0,
   current_balance numeric(38,18) not null default 0,
   institution     text,
