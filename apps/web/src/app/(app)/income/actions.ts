@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
-import { gatewayFetch } from "@/lib/gateway";
+import { ledgerFetch } from "@/lib/ledger";
 import { startTimer } from "@/lib/logger";
 import { requestLogger } from "@/lib/request-context";
 import { INCOME_SOURCE_VALUES } from "./constants";
@@ -80,7 +80,7 @@ export async function createIncome(
   // transaction + income atomically through the create_income RPC.
   let res: Response;
   try {
-    res = await gatewayFetch("/ledger/incomes", {
+    res = await ledgerFetch("/ledger/incomes", {
       method: "POST",
       body: JSON.stringify({
         amount,

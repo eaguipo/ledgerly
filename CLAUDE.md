@@ -47,7 +47,8 @@ Monorepo: `apps/web` (Next.js 16 frontend/BFF) · `services/api-gateway` · `ser
 Browser → web (Next.js BFF) → api-gateway → ledger service → Supabase Postgres
 ```
 
-- **Web is the BFF**: it holds the Supabase session (cookie-based via `@supabase/ssr`). Server Components/Actions call microservices through `apps/web/src/lib/gateway.ts` (`gatewayFetch`), which forwards the user's Supabase access token as a bearer. Never call a microservice from client components.
+- **Web is the BFF**: it holds the Supabase session (cookie-based via `@supabase/ssr`). Server Components/Actions reach the ledger through `apps/web/src/lib/ledger.ts` (`ledgerFetch`) — never `gatewayFetch` directly, and never from a client component.
+- **`ledgerFetch` has two transports, chosen by whether `GATEWAY_URL` is set.** Set (the mesh): `gatewayFetch` forwards the user's access token to the api-gateway. Unset (the Vercel deploy of `main`, which has no services): `lib/ledger-local.ts` answers the same `/ledger/*` paths in-process, reading through the RLS-scoped anon client and writing through the `do_*` RPCs, which derive identity from `auth.uid()`. The web tier never gets the service-role key on either path.
 - **api-gateway** validates the JWT (HS256 locally when `SUPABASE_JWT_SECRET` is set, otherwise Supabase Auth introspection), then proxies `/ledger/*` downstream. It deliberately does **not** forward the client's Authorization header — identity is asserted via `x-user-id` plus a shared `x-internal-secret` (`INTERNAL_API_SECRET`), backed by NetworkPolicy.
 - **ledger service** rejects any request lacking the internal secret, then uses the Supabase **service-role** client — which **bypasses RLS**, so every query must explicitly filter `.eq("user_id", userId)`. Money mutations go through SQL RPCs (`create_expense` in `db/functions/`) for atomicity, and DB guard errors (insufficient funds, currency mismatch) surface as 400s.
 

@@ -3,13 +3,14 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
-import { gatewayFetch } from "@/lib/gateway";
+import { ledgerFetch } from "@/lib/ledger";
 import { startTimer } from "@/lib/logger";
 import { requestLogger } from "@/lib/request-context";
 import { DEBT_KIND_VALUES } from "./constants";
 
 /**
- * Debt Server Actions. Every write goes through the api-gateway → ledger-service,
+ * Debt Server Actions. Every write goes through ledgerFetch — the api-gateway →
+ * ledger-service hop in the mesh, in-process RLS-scoped handlers on Vercel —
  * which owns the ledger: recording a debt can post a disbursement, and a payment
  * moves cash AND decrements the outstanding balance — both have to be atomic, so
  * both are RPCs behind the service.
@@ -112,7 +113,7 @@ export async function createDebt(
 
   let res: Response;
   try {
-    res = await gatewayFetch("/ledger/debts", {
+    res = await ledgerFetch("/ledger/debts", {
       method: "POST",
       body: JSON.stringify({
         kind,
@@ -244,7 +245,7 @@ export async function recordDebtPayment(
 
   let res: Response;
   try {
-    res = await gatewayFetch(`/ledger/debts/${debtId}/payments`, {
+    res = await ledgerFetch(`/ledger/debts/${debtId}/payments`, {
       method: "POST",
       body: JSON.stringify({
         amount,
@@ -351,7 +352,7 @@ async function patchDebt(
 
   let res: Response;
   try {
-    res = await gatewayFetch(`/ledger/debts/${id}`, {
+    res = await ledgerFetch(`/ledger/debts/${id}`, {
       method: "PATCH",
       body: JSON.stringify(patch),
     });

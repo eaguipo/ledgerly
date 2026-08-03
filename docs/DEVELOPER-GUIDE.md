@@ -489,10 +489,19 @@ kubectl -n ledgerly logs deploy/web    | jq -c --arg i "$ID" 'select(.reqId==$i)
 
 `main` has no services and no cluster — the web app talks to Supabase directly and ships on Vercel.
 
+That includes the ledger-backed features. `lib/ledger.ts` routes `/ledger/*` to the mesh when
+`GATEWAY_URL` is set and to in-process handlers over RLS-scoped Supabase when it is not, so
+Expenses, Income, Transfers and Debts all work on Vercel without a gateway. **Do not set
+`GATEWAY_URL` on Vercel** — there is nothing there for it to reach, and setting it turns every one
+of those pages into the degraded "couldn't reach the service" state.
+
 1. Push to GitHub, import the repo into Vercel, set the root directory to `apps/web`.
 2. Add `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`
-   as project environment variables.
-3. Deploy; confirm the `*.vercel.app` URL loads and signup works.
+   as project environment variables. Leave `GATEWAY_URL` unset.
+3. Apply everything under `db/functions/` in the Supabase SQL Editor — the write path on this
+   deploy goes through `do_income` / `do_expense` / `do_debt` from
+   `authenticated_entry_points.sql`, which delegate to the `create_*` functions.
+4. Deploy; confirm the `*.vercel.app` URL loads and signup works.
 
 Free-tier constraints worth knowing (Supabase pauses after ~7 idle days, Vercel Hobby is
 non-commercial, ~10s function timeout) are documented in [ROADMAP.md](ROADMAP.md).

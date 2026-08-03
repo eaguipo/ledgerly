@@ -2,7 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import type { Metadata } from "next";
 import { createClient } from "@/lib/supabase/server";
-import { gatewayFetch } from "@/lib/gateway";
+import { ledgerFetch } from "@/lib/ledger";
 import { startTimer } from "@/lib/logger";
 import { requestLogger } from "@/lib/request-context";
 import { IncomeForm } from "./income-form";
@@ -69,10 +69,11 @@ export default async function IncomePage() {
 
   const pageLog = log.child({ userId: user.id });
 
-  // Reads go through the api-gateway → ledger-service (no direct DB access).
+  // ledgerFetch picks the transport: the mesh when GATEWAY_URL is set, in-process
+  // handlers over RLS-scoped Supabase on the Vercel deploy. Same paths either way.
   const [optionsRes, listRes] = await Promise.all([
-    gatewayFetch("/ledger/incomes/options"),
-    gatewayFetch("/ledger/incomes?limit=30"),
+    ledgerFetch("/ledger/incomes/options"),
+    ledgerFetch("/ledger/incomes?limit=30"),
   ]);
 
   const options = optionsRes.ok

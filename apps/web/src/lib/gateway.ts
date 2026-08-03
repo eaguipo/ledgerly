@@ -67,7 +67,8 @@ export async function gatewayFetch(
     });
   } catch (err) {
     // Network-level failure: DNS, connection refused, socket hang-up. In the
-    // cluster this is usually the gateway pod not being ready yet.
+    // cluster this is usually the gateway pod not being ready yet; on the Vercel
+    // deploy of `main` there is no gateway host at all.
     callLog.error("gateway.request.unreachable", {
       method,
       path,
@@ -75,7 +76,15 @@ export async function gatewayFetch(
       durationMs: elapsed(),
       err,
     });
-    throw err;
+    // Return a synthetic 503 rather than rethrowing. Every caller already
+    // branches on `res.ok` and renders a degraded page, but a thrown error
+    // escapes that branch entirely and takes the whole route to the error
+    // boundary — so the one failure the pages were written to survive was the
+    // one failure that crashed them.
+    return new Response(
+      JSON.stringify({ error: "The service is currently unreachable." }),
+      { status: 503, headers: { "content-type": "application/json" } },
+    );
   }
 
   const durationMs = elapsed();

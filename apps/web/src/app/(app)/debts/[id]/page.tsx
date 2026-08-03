@@ -2,7 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import type { Metadata } from "next";
 import { createClient } from "@/lib/supabase/server";
-import { gatewayFetch } from "@/lib/gateway";
+import { ledgerFetch } from "@/lib/ledger";
 import { startTimer } from "@/lib/logger";
 import { requestLogger } from "@/lib/request-context";
 import { PaymentForm } from "./payment-form";
@@ -76,8 +76,8 @@ export default async function DebtDetailPage({
   const pageLog = log.child({ userId: user.id });
 
   const [detailRes, optionsRes] = await Promise.all([
-    gatewayFetch(`/ledger/debts/${id}`),
-    gatewayFetch("/ledger/debts/options"),
+    ledgerFetch(`/ledger/debts/${id}`),
+    ledgerFetch("/ledger/debts/options"),
   ]);
 
   if (!detailRes.ok) {

@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
-import { gatewayFetch } from "@/lib/gateway";
+import { ledgerFetch } from "@/lib/ledger";
 import { startTimer } from "@/lib/logger";
 import { requestLogger } from "@/lib/request-context";
 
@@ -74,7 +74,7 @@ export async function createExpense(
   // transaction + expense atomically through the create_expense RPC.
   let res: Response;
   try {
-    res = await gatewayFetch("/ledger/expenses", {
+    res = await ledgerFetch("/ledger/expenses", {
       method: "POST",
       body: JSON.stringify({
         amount,

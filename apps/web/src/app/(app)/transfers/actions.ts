@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
-import { gatewayFetch } from "@/lib/gateway";
+import { ledgerFetch } from "@/lib/ledger";
 import { startTimer } from "@/lib/logger";
 import { requestLogger } from "@/lib/request-context";
 
@@ -91,7 +91,7 @@ export async function createTransfer(
   // a debit can never land without its matching credit.
   let res: Response;
   try {
-    res = await gatewayFetch("/ledger/transfers", {
+    res = await ledgerFetch("/ledger/transfers", {
       method: "POST",
       body: JSON.stringify({
         amount,

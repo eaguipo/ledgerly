@@ -85,13 +85,23 @@ personal-finance-tracker/
     ├── create_debt.sql            debt + optional disbursement; widens income_source (loan_received)
     ├── create_debt_payment.sql    service-role sibling of do_debt_payment(), plus overpayment guards
     ├── debt_principal_recompute.sql  recompute_debt() helper + the debts-side trigger
-    └── cashflow_excludes_debt_origination.sql  keeps borrowing/lending out of inflow-outflow
+    ├── cashflow_excludes_debt_origination.sql  keeps borrowing/lending out of inflow-outflow
+    └── authenticated_entry_points.sql  do_income/do_expense/do_debt — the RLS-path
+                                        wrappers the Vercel deploy writes through
 ```
 
-Everything under `db/functions/` is mirrored into `db/schema.sql`, so a fresh install gets the same
-result from `schema.sql` → `policies.sql` → `seed.sql` alone. The files exist to apply the same
-definitions to an already-provisioned database. **When you change one, change both** — otherwise
-re-running `schema.sql` silently reverts the fix.
+Two kinds of file live in `db/functions/`, and they behave differently:
+
+- **New objects** (`create_*.sql`, `authenticated_entry_points.sql`) exist only here. `schema.sql`
+  knows nothing about them; they are applied by hand after it.
+- **Redefinitions of something `schema.sql` already creates** — currently
+  `debt_principal_recompute.sql` (§15c triggers) and `cashflow_excludes_debt_origination.sql`
+  (§19 views). These **must be kept byte-identical to `schema.sql`**, because re-running
+  `schema.sql` on a live database would otherwise silently revert them.
+
+Apply order matters: `create_debt.sql` before `cashflow_excludes_debt_origination.sql` (which
+references the `loan_received` enum value it adds), and all three `create_*` files before
+`authenticated_entry_points.sql` (which delegates to them).
 
 ---
 
@@ -102,7 +112,7 @@ re-running `schema.sql` silently reverts the fix.
 | Layer | Trusts | Database access | Never does |
 |-------|--------|-----------------|------------|
 | Browser / client components | nothing | anon key + RLS | hold secrets; call a microservice |
-| **web** (Next.js BFF) | the Supabase session cookie | anon key + RLS (portfolios, dashboard) | call the ledger directly; use the service-role key for user data |
+| **web** (Next.js BFF) | the Supabase session cookie | anon key + RLS — portfolios and dashboard always; everything else too when there is no gateway (Vercel) | call a microservice from a client component; **use the service-role key for user data** |
 | **api-gateway** | nothing — validates every JWT itself | none | forward the client's `Authorization` header downstream |
 | **ledger** | the gateway (proven by `x-internal-secret`) | **service-role — RLS is bypassed** | trust `x-user-id` without the internal secret; omit `.eq("user_id", …)` |
 | Supabase Postgres | the caller's role | — | — |
@@ -289,7 +299,7 @@ Treat this as the review checklist for every change.
 | `NEXT_PUBLIC_SUPABASE_URL` | web (browser + server) | `.env.local`; chart `web.env`; **build arg** for the prod image | Inlined into the client bundle at build time |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | web (browser + server) | same | Public by design; RLS is the boundary |
 | `SUPABASE_SERVICE_ROLE_KEY` | ledger (and web, unused today) | `.env.local`; chart `secretEnv` | Runtime only. Bypasses RLS |
-| `GATEWAY_URL` | web server code | chart `web.env` (`http://api-gateway`); `.env.local` for local runs | Default in `gateway.ts` is `http://api-gateway` |
+| `GATEWAY_URL` | web server code | chart `web.env` (`http://api-gateway`); `.env.local` for local runs | **Set = use the mesh; unset = run the ledger in-process over RLS** (`lib/ledger.ts`). Unset it and `/expenses`, `/income`, `/transfers`, `/debts` keep working without a cluster — that is how the Vercel deploy runs |
 | `SUPABASE_URL` | gateway, ledger | chart `env` | Trailing slashes are stripped by the gateway |
 | `SUPABASE_ANON_KEY` | gateway | chart `env` | Only used for the introspection fallback |
 | `SUPABASE_JWT_SECRET` | gateway | chart `secretEnv` | If set → local HS256 verify; **if set and wrong, everything 401s** (no fallback) |
