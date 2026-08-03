@@ -91,6 +91,16 @@ function InvestmentsIcon({ className }: IconProps) {
   );
 }
 
+function ReportsIcon({ className }: IconProps) {
+  return (
+    <svg {...stroke} className={className} aria-hidden>
+      <path d="M6.5 3.5h7l4.5 4.5v12a1 1 0 01-1 1h-10.5a1 1 0 01-1-1v-15a1 1 0 011-1z" />
+      <path d="M13.5 3.5V8H18" />
+      <path d="M8.5 16.5v-3M12 16.5v-5M15.5 16.5v-2" />
+    </svg>
+  );
+}
+
 // Ordered by how money actually moves: where it sits, in, out, between, owed,
 // then what it is being saved toward. Investments sit after Goals rather than
 // beside Portfolios on purpose — they are not spendable cash (Rule 17), and
@@ -104,4 +114,6 @@ export const NAV_ITEMS = [
   { href: "/debts", label: "Debts", Icon: DebtsIcon },
   { href: "/goals", label: "Goals", Icon: GoalsIcon },
   { href: "/investments", label: "Investments", Icon: InvestmentsIcon },
+  // Last because it reads everything above it rather than adding anything.
+  { href: "/reports", label: "Reports", Icon: ReportsIcon },
 ] as const;

@@ -186,8 +186,8 @@ grant select on public.transfers to authenticated;   -- writes via transfer RPCs
 grant select on public.audit_log to authenticated;    -- RLS limits to admins
 grant select on
   public.v_portfolio_balances, public.v_liquid_by_currency, public.v_cashflow,
-  public.v_expense_by_category, public.v_debt_outstanding, public.v_completed_goals,
-  public.v_investment_performance
+  public.v_expense_by_category, public.v_income_by_source, public.v_debt_outstanding,
+  public.v_completed_goals, public.v_investment_performance
 to authenticated;
 grant usage, select on all sequences in schema public to authenticated;
 

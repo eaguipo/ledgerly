@@ -970,6 +970,21 @@ create or replace view public.v_expense_by_category
   where e.debt_id is null and e.investment_id is null
   group by e.user_id, ec.id, ec.name, t.txn_date, c.code;
 
+-- The income-side counterpart. Drops source = 'loan_received' for the same
+-- reason v_cashflow does — borrowing is not earning — so the two views agree
+-- about the same month. Grouped by the ENUM, with source_label riding along so
+-- the UI can name a user-typed 'other' source without fragmenting the buckets
+-- reporting depends on. See db/functions/v_income_by_source.sql.
+create or replace view public.v_income_by_source
+  with (security_invoker = true) as
+  select i.user_id, i.source, i.source_label, t.txn_date,
+         c.code as currency_code, sum(t.amount) as total
+  from public.incomes i
+  join public.transactions t on t.id = i.transaction_id and t.is_void = false
+  join public.currencies c on c.id = t.currency_id
+  where i.source <> 'loan_received'
+  group by i.user_id, i.source, i.source_label, t.txn_date, c.code;
+
 create or replace view public.v_debt_outstanding
   with (security_invoker = true) as
   select d.user_id, d.id as debt_id, d.kind, d.counterparty, d.outstanding_balance, d.status, c.code as currency_code
