@@ -49,6 +49,12 @@ const DEBT_PAYMENT_SELECT =
   "id, amount, principal_portion, interest_portion, payment_date, note, " +
   "transaction:transactions(id, kind, portfolio:portfolios(name))";
 
+const GOAL_SELECT =
+  "id, name, target_amount, current_amount, currency_id, linked_portfolio_id, " +
+  "status, target_date, achieved_at, first_achieved_at, created_at, " +
+  "currency:currencies(code, symbol, minor_unit), " +
+  "linked_portfolio:portfolios!linked_portfolio_id(name, current_balance)";
+
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -301,6 +307,75 @@ export async function localLedger(
       _note: body.note ?? null,
     });
     return done(error ? dbFail(error) : json({ payment: data }, 201));
+  }
+
+  // ---- goals -------------------------------------------------------------
+  if (route === "/goals" && method === "GET") {
+    // Cancelled hides with archived: both mean "not something I'm working
+    // toward". Matches the ledger route's filter exactly.
+    let q = sb.from("goals").select(GOAL_SELECT);
+    if (url.searchParams.get("include_archived") !== "true") {
+      q = q.not("status", "in", "(archived,cancelled)");
+    }
+    const { data, error } = await q
+      .order("created_at", { ascending: false })
+      .limit(limitOf(url));
+    return done(error ? dbFail(error) : json({ goals: data ?? [] }));
+  }
+
+  if (route === "/goals/options" && method === "GET") {
+    const [portfolios, currencies] = await Promise.all([
+      activePortfolios(sb),
+      sb.from("currencies").select("id, code, symbol, minor_unit").eq("is_active", true).order("code"),
+    ]);
+    const error = portfolios.error ?? currencies.error;
+    return done(
+      error
+        ? dbFail(error)
+        : json({ portfolios: portfolios.data ?? [], currencies: currencies.data ?? [] }),
+    );
+  }
+
+  if (route === "/goals" && method === "POST") {
+    const { data, error } = await sb.rpc("do_goal", {
+      _name: body.name,
+      _target: body.target_amount,
+      _currency_id: body.currency_id,
+      _target_date: body.target_date ?? null,
+      _linked_portfolio: body.linked_portfolio_id ?? null,
+    });
+    return done(error ? dbFail(error) : json({ goal: data }, 201));
+  }
+
+  const goalId = route.match(/^\/goals\/([^/]+)$/)?.[1];
+  const contributionsFor = route.match(/^\/goals\/([^/]+)\/contributions$/)?.[1];
+
+  if (goalId && method === "PATCH") {
+    if (!UUID_RE.test(goalId)) return done(json({ error: "Invalid goal id." }, 400));
+    // No status special-case here, unlike the debts PATCH: trg_goal_status is a
+    // BEFORE trigger on goals, so reopening one that is already at its target
+    // corrects itself to 'achieved' inside this same statement.
+    const { data, error } = await sb
+      .from("goals")
+      .update(body)
+      .eq("id", goalId)
+      .select(GOAL_SELECT)
+      .maybeSingle();
+    if (error) return done(dbFail(error));
+    if (!data) return done(json({ error: "Goal not found." }, 404));
+    return done(json({ goal: data }));
+  }
+
+  if (contributionsFor && method === "POST") {
+    if (!UUID_RE.test(contributionsFor))
+      return done(json({ error: "Invalid goal id." }, 400));
+    const { data, error } = await sb.rpc("do_goal_contribution", {
+      _goal_id: contributionsFor,
+      _amount: body.amount,
+      _contributed_on: body.contributed_on,
+      _note: body.note ?? null,
+    });
+    return done(error ? dbFail(error) : json({ contribution: data }, 201));
   }
 
   callLog.warn("ledger.local.unknown_route", { method, route });

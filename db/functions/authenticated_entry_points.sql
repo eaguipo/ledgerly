@@ -1,8 +1,9 @@
 -- ============================================================================
--- do_income / do_expense / do_debt — RLS-path entry points for the money RPCs.
+-- do_income / do_expense / do_debt / do_goal — RLS-path entry points for the
+-- money RPCs.
 --
--- Run this in the Supabase SQL Editor AFTER create_expense.sql, create_income.sql
--- and create_debt.sql — it calls all three, so they must exist first.
+-- Run this in the Supabase SQL Editor AFTER every create_*.sql in this folder —
+-- it calls them all, so they must exist first.
 --
 -- WHY
 -- `main` ships on Vercel with no api-gateway and no ledger service (CLAUDE.md,
@@ -97,6 +98,42 @@ begin
     _interest_rate, _due_date, _note, _disbursement_portfolio, _disbursement_date);
 end $$;
 
+-- Goals move no money (decision D2), but they take the same shape for the same
+-- reason: create_goal / create_goal_contribution hold the validation, and
+-- granting either to `authenticated` would expose a _user_id parameter.
+create or replace function public.do_goal(
+  _name             text,
+  _target           numeric,
+  _currency_id      uuid,
+  _target_date      date default null,
+  _linked_portfolio uuid default null
+) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare v_uid uuid := auth.uid();
+begin
+  if v_uid is null then
+    raise exception 'Not authenticated' using errcode = '28000';
+  end if;
+  return public.create_goal(
+    v_uid, _name, _target, _currency_id, _target_date, _linked_portfolio);
+end $$;
+
+create or replace function public.do_goal_contribution(
+  _goal_id        uuid,
+  _amount         numeric,
+  _contributed_on date default current_date,
+  _note           text default null
+) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare v_uid uuid := auth.uid();
+begin
+  if v_uid is null then
+    raise exception 'Not authenticated' using errcode = '28000';
+  end if;
+  return public.create_goal_contribution(
+    v_uid, _goal_id, _amount, _contributed_on, _note);
+end $$;
+
 -- Replacing the two legacy copies. Same names and argument lists so any existing
 -- caller keeps compiling; the body now delegates and the return type becomes the
 -- same jsonb summary the create_* functions produce.
@@ -154,6 +191,12 @@ grant execute on function public.do_expense(uuid, uuid, numeric, date, text, tex
 
 revoke all on function public.do_debt(public.debt_kind, text, numeric, uuid, numeric, date, text, uuid, date) from public;
 grant execute on function public.do_debt(public.debt_kind, text, numeric, uuid, numeric, date, text, uuid, date) to authenticated;
+
+revoke all on function public.do_goal(text, numeric, uuid, date, uuid) from public;
+grant execute on function public.do_goal(text, numeric, uuid, date, uuid) to authenticated;
+
+revoke all on function public.do_goal_contribution(uuid, numeric, date, text) from public;
+grant execute on function public.do_goal_contribution(uuid, numeric, date, text) to authenticated;
 
 -- Un-writing-off a debt has to re-derive its status from the payment history,
 -- so the web tier needs this too. Unlike the wrappers above it is NOT security

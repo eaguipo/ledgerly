@@ -86,8 +86,11 @@ personal-finance-tracker/
     ├── create_debt_payment.sql    service-role sibling of do_debt_payment(), plus overpayment guards
     ├── debt_principal_recompute.sql  recompute_debt() helper + the debts-side trigger
     ├── cashflow_excludes_debt_origination.sql  keeps borrowing/lending out of inflow-outflow
-    └── authenticated_entry_points.sql  do_income/do_expense/do_debt — the RLS-path
-                                        wrappers the Vercel deploy writes through
+    ├── create_goal.sql            goal + linked-account currency check (no money moves)
+    ├── create_goal_contribution.sql  earmark/withdraw, plus the over-withdrawal guard
+    └── authenticated_entry_points.sql  do_income/do_expense/do_debt/do_goal/
+                                        do_goal_contribution — the RLS-path wrappers
+                                        the Vercel deploy writes through
 ```
 
 Two kinds of file live in `db/functions/`, and they behave differently:
@@ -100,8 +103,8 @@ Two kinds of file live in `db/functions/`, and they behave differently:
   `schema.sql` on a live database would otherwise silently revert them.
 
 Apply order matters: `create_debt.sql` before `cashflow_excludes_debt_origination.sql` (which
-references the `loan_received` enum value it adds), and all three `create_*` files before
-`authenticated_entry_points.sql` (which delegates to them).
+references the `loan_received` enum value it adds), and **every** `create_*` file before
+`authenticated_entry_points.sql` (which delegates to them all).
 
 ---
 
@@ -192,9 +195,10 @@ Key mechanics:
   would push a non-`allow_negative` portfolio below zero, whatever wrote it.
   `txn_enforce_currency()` requires the transaction currency to match the portfolio's.
 - **Money RPCs are the write path for anything multi-row**: `create_expense()`, `create_income()`,
-  `create_transfer()`, `create_debt()`, `create_debt_payment()`, `do_transfer()`,
-  `do_debt_payment()`. Each runs in one transaction and locks what it needs. Clients cannot write
-  `transfers` or `debt_payments` directly.
+  `create_transfer()`, `create_debt()`, `create_debt_payment()`, `create_goal()`,
+  `create_goal_contribution()`, `do_transfer()`, `do_debt_payment()`. Each runs in one transaction
+  and locks what it needs. Clients cannot write `transfers`, `debt_payments` or
+  `goal_contributions` directly.
 - **Two RPC dialects, and picking the wrong one fails confusingly.** The older `do_*` functions read
   identity from `auth.uid()` and are granted to `authenticated` — the RLS path. The newer `create_*`
   functions take `_user_id` explicitly and are granted to `service_role` — the path ledger-service
@@ -202,6 +206,15 @@ Key mechanics:
   misses and you get "not found or not owned by you" for a row that plainly exists. `create_transfer`
   and `create_debt_payment` exist precisely because `do_transfer` / `do_debt_payment` cannot be
   called from the service. Keep each pair in sync until the `do_*` half is retired.
+- **Goals move no money, and that is the whole design.** `goal_contributions` is an earmark laid
+  over balances you already hold (decision D2): `transaction_id` stays NULL, no ledger row is
+  posted, no portfolio balance changes. It follows that earmarks can exceed real money — the /goals
+  page warns when the goals pointing at an account total more than it holds, and deliberately does
+  not block it. Moving money into savings for real is a Transfer.
+- **`create_goal_contribution` guards over-withdrawal for the same reason `create_debt_payment`
+  guards overpayment.** `apply_goal_contribution()` sets `current_amount = greatest(sum(amount), 0)`,
+  so taking back more than is set aside clamps the cached total at zero while the underlying sum
+  goes negative — and every later contribution is then measured from a phantom deficit.
 - **`create_debt_payment` is not a pure port.** It adds guards `do_debt_payment` never had: an
   overpayment is rejected rather than silently absorbed by `greatest(principal − paid, 0)`, and a
   settled or archived debt refuses payment. A *written-off* debt still accepts one — recovering on a
@@ -686,6 +699,9 @@ Health probes are excluded from the services' request logging (`quietLogControll
 | Debt says "Debt not found or not owned by you" for one that plainly exists | which RPC is being called | Same trap as above: `do_debt_payment()` called as service_role. Use `create_debt_payment()` |
 | Debt outstanding looks stale after editing the principal | `debt_principal_recompute.sql` | The file was never run, so the `debts`-side trigger doesn't exist and only a payment recomputes |
 | "Principal of X is more than the Y still outstanding" | `create_debt_payment` overpayment guard | Working as intended — use the form's "pay the remaining" shortcut rather than typing a larger figure |
+| "You can only take back the X currently set aside" | `create_goal_contribution` guard | Working as intended — a goal cannot go negative, and clamping it silently would desync `current_amount` from its contribution rows |
+| A goal reopens as "achieved" right after you reopen it | `refresh_goal_status` (schema §15d) | Correct: it is a BEFORE trigger, so a goal already at its target is promoted again inside the same update |
+| Goals total more than the account backing them | nothing — advisory only | Inherent to the earmark model (D2). The /goals page warns; it never blocks |
 | 400 "Insufficient funds…" | `txn_overdraft_guard` | Real overdraft, or a drifted `current_balance` cache |
 | "Transaction currency must match portfolio currency" | `txn_enforce_currency` | Code derived the currency from the wrong place — always take it from the portfolio |
 | Balances wrong after edits | `apply_txn_to_balance` | A void/update path that didn't go through the trigger; run `select reconcile_portfolio_balances();` |
