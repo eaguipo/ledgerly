@@ -1190,6 +1190,11 @@ const DEBT_PAYMENT_SELECT =
   "id, amount, principal_portion, interest_portion, payment_date, note, " +
   "transaction:transactions(id, kind, portfolio:portfolios(name))";
 
+// Cash-free corrections to what is owed. No transaction embed on purpose —
+// having none is exactly what distinguishes an adjustment from a payment.
+const DEBT_ADJUSTMENT_SELECT =
+  "id, amount, reason, effective_on, note, created_at";
+
 /**
  * `status` off a PostgREST row whose type the client could not infer. An
  * `.update(patch)` where `patch` is a plain Record widens the following
@@ -1317,7 +1322,7 @@ app.get("/debts/:id", async (req, reply) => {
   if (!UUID_RE.test(id)) return reply.code(400).send({ error: "Invalid debt id." });
   const startedAt = process.hrtime.bigint();
 
-  const [debt, payments] = await Promise.all([
+  const [debt, payments, adjustments, disbIn, disbOut] = await Promise.all([
     admin()
       .from("debts")
       .select(DEBT_SELECT)
@@ -1331,6 +1336,32 @@ app.get("/debts/:id", async (req, reply) => {
       .eq("debt_id", id)
       .order("payment_date", { ascending: false })
       .order("created_at", { ascending: false }),
+    admin()
+      .from("debt_adjustments")
+      .select(DEBT_ADJUSTMENT_SELECT)
+      .eq("user_id", userId)
+      .eq("debt_id", id)
+      .order("effective_on", { ascending: false })
+      .order("created_at", { ascending: false }),
+    // Did this debt post a disbursement? create_debt() records it as an incomes
+    // row for a payable and an expenses row for a receivable, so both are
+    // checked. Nothing else on the response answers this, and it is what decides
+    // whether re-tagging will move money — so the edit page can warn honestly
+    // instead of warning always.
+    admin()
+      .from("incomes")
+      .select("transaction_id")
+      .eq("user_id", userId)
+      .eq("debt_id", id)
+      .limit(1)
+      .maybeSingle(),
+    admin()
+      .from("expenses")
+      .select("transaction_id")
+      .eq("user_id", userId)
+      .eq("debt_id", id)
+      .limit(1)
+      .maybeSingle(),
   ]);
 
   if (debt.error || payments.error) {
@@ -1355,16 +1386,29 @@ app.get("/debts/:id", async (req, reply) => {
     return reply.code(404).send({ error: "Debt not found." });
   }
 
+  const disbursementTxnId =
+    disbIn.data?.transaction_id ?? disbOut.data?.transaction_id ?? null;
+
   req.log.debug(
     {
       userId,
       debtId: id,
       payments: payments.data?.length ?? 0,
+      adjustments: adjustments.data?.length ?? 0,
+      hasDisbursement: disbursementTxnId !== null,
+      // Not a 500: adjustments only enrich the page, and a debt with none is
+      // indistinguishable from a failed lookup here — so say which it was.
+      adjustmentLookupFailed: Boolean(adjustments.error),
       dbMs: since(startedAt),
     },
     "ledger.debts.get_ok",
   );
-  return { debt: debt.data, payments: payments.data ?? [] };
+  return {
+    debt: debt.data,
+    payments: payments.data ?? [],
+    adjustments: adjustments.data ?? [],
+    disbursement_transaction_id: disbursementTxnId,
+  };
 });
 
 // Record a debt, optionally posting the cash that changed hands (create_debt).
@@ -1482,10 +1526,19 @@ app.post("/debts", async (req, reply) => {
   return reply.code(201).send({ debt: data });
 });
 
-// Edit a debt's descriptive fields. No hard DELETE route exists: debts cascade
-// to debt_payments, whose transaction_id is `on delete restrict` on the
-// transactions side — deleting a debt would drop its payment rows and orphan
-// ledger transactions that moved real money. Archive instead.
+// Edit a debt's descriptive fields, or RE-TAG it payable <-> receivable.
+//
+// This goes through update_debt() rather than writing the table, and `kind` is
+// why. It decides the direction of every ledger row hanging off the debt — a
+// payable's disbursement is cash IN and its payments are cash OUT; a
+// receivable's are the reverse. Changing the word alone would leave the ledger
+// contradicting the debt, so the RPC re-posts every leg in the opposite
+// direction, and refuses when the account cannot absorb the swing.
+//
+// No hard DELETE route exists: debts cascade to debt_payments, whose
+// transaction_id is `on delete restrict` on the transactions side — deleting a
+// debt would drop its payment rows and orphan ledger transactions that moved
+// real money. Archive instead.
 app.patch("/debts/:id", async (req, reply) => {
   const userId = userIdOf(req, reply);
   if (!userId) return reply;
@@ -1500,6 +1553,14 @@ app.patch("/debts/:id", async (req, reply) => {
     return reply.code(400).send({ error: message });
   };
 
+  // The re-tag. Everything else on this route is descriptive; this one re-posts
+  // every ledger leg, so it is the reason the whole route goes through the RPC.
+  if (b.kind !== undefined) {
+    const kind = String(b.kind);
+    if (!DEBT_KINDS.has(kind))
+      return invalid("kind", "Choose whether you owe this or are owed it.");
+    patch.kind = kind;
+  }
   if (b.counterparty !== undefined) {
     const counterparty = String(b.counterparty).trim();
     if (!counterparty) return invalid("counterparty", "Who is this debt with?");
@@ -1541,15 +1602,16 @@ app.patch("/debts/:id", async (req, reply) => {
     return invalid("body", "Nothing to update.");
 
   const startedAt = process.hrtime.bigint();
-  const { data, error } = await admin()
-    .from("debts")
-    .update(patch)
-    .eq("user_id", userId)
-    .eq("id", id)
-    .select(DEBT_SELECT)
-    .maybeSingle();
+  const { data, error } = await admin().rpc("update_debt", {
+    _user_id: userId,
+    _debt_id: id,
+    _patch: patch,
+  });
 
   if (error) {
+    // The refusals worth expecting: re-tagging a debt whose disbursement has
+    // already been spent (the account cannot absorb reversing it), and the
+    // hand-set-status guard. Both are P0001 raises, hence 400.
     req.log.warn(
       {
         userId,
@@ -1562,47 +1624,174 @@ app.patch("/debts/:id", async (req, reply) => {
     );
     return reply.code(400).send({ error: error.message });
   }
-  if (!data) {
+
+  // The RPC returns a summary; re-read the row so this route keeps answering
+  // with the same shape the detail page and ledger-local expect. It also
+  // already re-derived the status after an un-write-off, so unlike the old
+  // direct-write version there is no second recompute to do here.
+  const fresh = await admin()
+    .from("debts")
+    .select(DEBT_SELECT)
+    .eq("user_id", userId)
+    .eq("id", id)
+    .maybeSingle();
+
+  if (!fresh.data) {
     req.log.warn({ userId, debtId: id }, "ledger.debt.update_not_found");
     return reply.code(404).send({ error: "Debt not found." });
   }
 
-  // Un-writing-off is the one status change we cannot take at face value.
-  // 'open' is what the caller asks for, but a debt with payments against it is
-  // really 'partially_paid' — and nothing would correct that until the next
-  // payment fired the recompute trigger. Derive it from the payment history now.
-  let debt = data;
-  if (patch.status === "open") {
-    const recomputed = await admin().rpc("recompute_debt", { _debt_id: id });
-    if (recomputed.error) {
-      // The debt IS reopened at this point; only the derived status may be
-      // stale, and the next payment fixes it. Worth a line, not a failure.
-      req.log.error(
-        { userId, debtId: id, ...dbErrorFields(recomputed.error) },
-        "ledger.debt.reopen_recompute_failed",
-      );
-    } else {
-      const fresh = await admin()
-        .from("debts")
-        .select(DEBT_SELECT)
-        .eq("user_id", userId)
-        .eq("id", id)
-        .maybeSingle();
-      if (fresh.data) debt = fresh.data;
-    }
-  }
-
+  const summary = (data ?? {}) as { retagged?: boolean; legs_reposted?: number };
   req.log.info(
     {
       userId,
       debtId: id,
       fields: Object.keys(patch),
-      statusAfter: statusOf(debt),
+      statusAfter: statusOf(fresh.data),
+      // True means every ledger leg was re-posted in the opposite direction and
+      // account balances moved — the difference between a rename and a re-tag.
+      retagged: summary.retagged ?? false,
+      legsReposted: summary.legs_reposted ?? 0,
       dbMs: since(startedAt),
     },
     "ledger.debt.update_ok",
   );
-  return { debt };
+  return { debt: fresh.data, retagged: summary.retagged ?? false };
+});
+
+// ---------------------------------------------------------------------------
+// DEBT ADJUSTMENTS — what changed about the debt WITHOUT cash moving.
+//
+// outstanding_balance is derived (principal + charges − paid − credits), so
+// correcting it means adding an input rather than writing the column: the next
+// payment would overwrite anything set directly. Interest accruing, a payment
+// made outside this app, or a write-down all land here.
+// ---------------------------------------------------------------------------
+
+const ADJUSTMENT_REASONS = new Set([
+  "interest",
+  "fee",
+  "payment_off_app",
+  "forgiven",
+  "correction",
+]);
+
+app.post("/debts/:id/adjustments", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+  const { id } = req.params as { id: string };
+  if (!UUID_RE.test(id)) return reply.code(400).send({ error: "Invalid debt id." });
+
+  const b = (req.body ?? {}) as Record<string, unknown>;
+  const amount = Number(b.amount);
+  const reason = String(b.reason ?? "");
+  const effectiveOn = b.effective_on ? String(b.effective_on) : null;
+  const note = b.note ? String(b.note) : null;
+
+  const invalid = (field: string, message: string) => {
+    req.log.warn(
+      { userId, debtId: id, field, amount, reason },
+      "ledger.debt_adjustment.create_invalid",
+    );
+    return reply.code(400).send({ error: message });
+  };
+
+  // Zero is the only forbidden amount — the sign is the whole point, and which
+  // signs are legal per reason is enforced by the RPC and a check constraint.
+  if (!Number.isFinite(amount) || amount === 0)
+    return invalid("amount", "Enter an amount to add to or take off the debt.");
+  if (!ADJUSTMENT_REASONS.has(reason))
+    return invalid("reason", "Choose what this adjustment is for.");
+  if (effectiveOn !== null && !/^\d{4}-\d{2}-\d{2}$/.test(effectiveOn))
+    return invalid("effective_on", "Date is not a valid date.");
+
+  const startedAt = process.hrtime.bigint();
+  const { data, error } = await admin().rpc("create_debt_adjustment", {
+    _user_id: userId,
+    _debt_id: id,
+    _amount: amount,
+    _reason: reason,
+    _effective_on: effectiveOn,
+    _note: note,
+  });
+
+  if (error) {
+    // Most often the sign disagreeing with the reason, or an archived debt.
+    req.log.warn(
+      {
+        userId,
+        debtId: id,
+        amount,
+        reason,
+        dbMs: since(startedAt),
+        ...dbErrorFields(error),
+      },
+      "ledger.debt_adjustment.create_rejected",
+    );
+    return reply.code(400).send({ error: error.message });
+  }
+
+  const created = (data ?? {}) as {
+    adjustment_id?: string;
+    outstanding_after?: string;
+    status_after?: string;
+  };
+  // outstanding_after is the point of the whole operation — log what it became.
+  req.log.info(
+    {
+      userId,
+      debtId: id,
+      adjustmentId: created.adjustment_id,
+      amount,
+      reason,
+      outstandingAfter: created.outstanding_after,
+      statusAfter: created.status_after,
+      dbMs: since(startedAt),
+    },
+    "ledger.debt_adjustment.create_ok",
+  );
+  return reply.code(201).send({ adjustment: data });
+});
+
+/** Remove an adjustment. No cash is involved, so the outstanding just re-derives. */
+app.delete("/debts/:debtId/adjustments/:id", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+  const { id } = req.params as { id: string };
+  if (!UUID_RE.test(id))
+    return reply.code(400).send({ error: "Invalid adjustment id." });
+
+  const startedAt = process.hrtime.bigint();
+  const { data, error } = await admin().rpc("delete_debt_adjustment", {
+    _user_id: userId,
+    _adjustment_id: id,
+  });
+
+  if (error) {
+    req.log.warn(
+      { userId, adjustmentId: id, dbMs: since(startedAt), ...dbErrorFields(error) },
+      "ledger.debt_adjustment.delete_rejected",
+    );
+    return reply.code(400).send({ error: error.message });
+  }
+
+  const removed = (data ?? {}) as {
+    debt_id?: string;
+    outstanding_after?: string;
+    status_after?: string;
+  };
+  req.log.info(
+    {
+      userId,
+      adjustmentId: id,
+      debtId: removed.debt_id,
+      outstandingAfter: removed.outstanding_after,
+      statusAfter: removed.status_after,
+      dbMs: since(startedAt),
+    },
+    "ledger.debt_adjustment.delete_ok",
+  );
+  return { deleted: data };
 });
 
 // Record a payment against a debt (create_debt_payment). Moves real cash AND

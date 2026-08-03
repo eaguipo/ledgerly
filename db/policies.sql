@@ -127,6 +127,12 @@ create policy transfers_select on public.transfers for select to authenticated u
 alter table public.debt_payments enable row level security;
 create policy debt_pay_select on public.debt_payments for select to authenticated using (user_id = auth.uid());
 
+-- debt_adjustments: cash-free corrections to what is owed (interest, a payment
+-- made outside the app, a write-down). Created only by the do_debt_adjustment()
+-- RPC, same as debt_payments — owner reads, no direct writes.
+alter table public.debt_adjustments enable row level security;
+create policy debt_adj_select on public.debt_adjustments for select to authenticated using (user_id = auth.uid());
+
 -- 7. DEBTS — writes feature-gated ('debts'); SELECT open for historical reporting.
 alter table public.debts enable row level security;
 create policy debts_select on public.debts for select to authenticated using (user_id = auth.uid());
@@ -183,6 +189,7 @@ grant select, insert, update, delete on
   public.investments, public.investment_snapshots, public.user_feature_access
 to authenticated;
 grant select on public.transfers to authenticated;   -- writes via transfer RPCs only
+grant select on public.debt_adjustments to authenticated;  -- writes via debt RPCs only
 grant select on public.audit_log to authenticated;    -- RLS limits to admins
 grant select on
   public.v_portfolio_balances, public.v_liquid_by_currency, public.v_cashflow,

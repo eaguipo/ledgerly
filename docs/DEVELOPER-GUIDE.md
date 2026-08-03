@@ -109,13 +109,23 @@ Supabase SQL Editor → New query → paste and run each file, one at a time:
                                     do_income with one more parameter each, so
                                     any of THOSE FOUR run after it puts the old
                                     signatures back.
-     edit_and_delete_entries.sql    LAST. Editing and deleting an expense, an
-                                    income entry or an investment: update_* /
-                                    delete_* plus their do_* wrappers. Needs
+     edit_and_delete_entries.sql    Editing and deleting an expense, an income
+                                    entry or an investment: update_* / delete_*
+                                    plus their do_* wrappers. Needs
                                     incomes.source_label (custom_option_labels)
                                     and expenses.investment_id (money_invested),
                                     and re-creates nothing — so unlike the file
                                     above, running things after it is harmless.
+     debt_editing_and_adjustments.sql  LAST. Re-tagging a debt payable <->
+                                    receivable (update_debt re-posts every ledger
+                                    leg in the opposite direction) and the
+                                    debt_adjustments table for changing what is
+                                    owed WITHOUT moving cash. Re-creates
+                                    recompute_debt(), so anything applied after
+                                    it that also defines that function —
+                                    schema.sql §15c, debt_principal_recompute.sql
+                                    — would revert adjustments. All three copies
+                                    are byte-identical; keep them that way.
 ```
 
 Order matters for 1–3: `policies.sql` references objects created in `schema.sql`, and `seed.sql`
