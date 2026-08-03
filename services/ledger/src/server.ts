@@ -12,6 +12,10 @@ import {
 
 const PORT = Number(process.env.PORT ?? 8080);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// User-typed option names (a new expense category, a custom income source).
+// Mirrors the 40-char ceiling in db/functions/custom_option_labels.sql — checked
+// here so an over-long value is a clean 400 rather than a constraint violation.
+const MAX_CUSTOM_LABEL = 40;
 // Defense-in-depth: only the gateway knows this shared secret. It backs the
 // x-user-id trust (which alone is forgeable by any pod that can reach us) and
 // works regardless of NetworkPolicy/CNI enforcement. Set via Helm secretEnv.
@@ -207,20 +211,28 @@ app.post("/expenses", async (req, reply) => {
   const amount = Number(b.amount);
   const portfolioId = String(b.portfolio_id ?? "");
   const categoryId = String(b.category_id ?? "");
+  const newCategory = b.new_category ? String(b.new_category).trim() : "";
   const txnDate = String(b.txn_date ?? "");
   const description = b.description ? String(b.description) : null;
   const merchant = b.merchant ? String(b.merchant) : null;
 
+  // An existing category always wins over a typed one, the same precedence
+  // create_expense() applies — so a caller that sends both can never end up
+  // creating a duplicate category alongside the one it already picked.
+  const hasCategoryId = UUID_RE.test(categoryId);
+
   // Money in, money out: log the request before touching the DB so a request
   // that never returns still leaves a trace of what it was trying to do. Free
   // text (merchant/description) stays out — it is the user's private data and
-  // tells you nothing when debugging.
+  // tells you nothing when debugging. A new category name is not private detail
+  // but a list entry the user will see, and it is the thing being created here.
   req.log.debug(
     {
       userId,
       amount,
       portfolioId,
       categoryId,
+      newCategory: hasCategoryId ? null : newCategory,
       txnDate,
       hasDescription: description !== null,
       hasMerchant: merchant !== null,
@@ -230,7 +242,7 @@ app.post("/expenses", async (req, reply) => {
 
   const invalid = (field: string, message: string) => {
     req.log.warn(
-      { userId, field, amount, portfolioId, categoryId, txnDate },
+      { userId, field, amount, portfolioId, categoryId, newCategory, txnDate },
       "ledger.expense.create_invalid",
     );
     return reply.code(400).send({ error: message });
@@ -240,8 +252,14 @@ app.post("/expenses", async (req, reply) => {
     return invalid("amount", "Amount must be greater than zero.");
   if (!UUID_RE.test(portfolioId))
     return invalid("portfolio_id", "Select an account.");
-  if (!UUID_RE.test(categoryId))
-    return invalid("category_id", "Select a category.");
+  if (!hasCategoryId) {
+    if (!newCategory) return invalid("category_id", "Select a category.");
+    if (newCategory.length > MAX_CUSTOM_LABEL)
+      return invalid(
+        "new_category",
+        `Category name must be ${MAX_CUSTOM_LABEL} characters or fewer.`,
+      );
+  }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(txnDate))
     return invalid("txn_date", "Date is required.");
 
@@ -249,11 +267,12 @@ app.post("/expenses", async (req, reply) => {
   const { data, error } = await admin().rpc("create_expense", {
     _user_id: userId,
     _portfolio_id: portfolioId,
-    _category_id: categoryId,
+    _category_id: hasCategoryId ? categoryId : null,
     _amount: amount,
     _txn_date: txnDate,
     _description: description,
     _merchant: merchant,
+    _new_category: hasCategoryId ? null : newCategory,
   });
 
   if (error) {
@@ -268,6 +287,7 @@ app.post("/expenses", async (req, reply) => {
         amount,
         portfolioId,
         categoryId,
+        newCategory,
         txnDate,
         dbMs: since(startedAt),
         ...dbErrorFields(error),
@@ -280,10 +300,13 @@ app.post("/expenses", async (req, reply) => {
   const created = (data ?? {}) as {
     expense_id?: string;
     transaction_id?: string;
+    category_id?: string;
   };
 
   // The one line that proves money moved. `transactionId` is the handle for
   // finding the row in Supabase; `dbMs` is how long the atomic RPC took.
+  // `categoryId` comes back from the RPC because an inline creation means the
+  // caller never knew it.
   req.log.info(
     {
       userId,
@@ -291,7 +314,8 @@ app.post("/expenses", async (req, reply) => {
       transactionId: created.transaction_id,
       amount,
       portfolioId,
-      categoryId,
+      categoryId: created.category_id ?? categoryId,
+      createdCategory: hasCategoryId ? null : newCategory,
       txnDate,
       dbMs: since(startedAt),
     },
@@ -303,7 +327,7 @@ app.post("/expenses", async (req, reply) => {
 // The income row shape the web app renders. `incomes` mirrors `expenses`: two
 // foreign keys to `transactions`, so the composite FK name disambiguates the embed.
 const INCOME_SELECT =
-  "id, source, source_name, is_recurring, " +
+  "id, source, source_name, source_label, is_recurring, " +
   "transaction:transactions!incomes_txn_kind_fk(id, amount, txn_date, description, " +
   "currency:currencies(code, symbol, minor_unit), portfolio:portfolios(name))";
 
@@ -328,6 +352,24 @@ const INCOME_SOURCES = new Set([
   "gift",
   "other",
 ]);
+
+/**
+ * The custom source names this user has typed before, newest first, so the
+ * income form can offer them back instead of making them retype. Deduped
+ * case-insensitively — "Royalties" and "royalties" are one suggestion.
+ * Mirrors distinctLabels in apps/web/src/lib/ledger-local.ts.
+ */
+function distinctLabels(rows: { source_label: string | null }[] | null): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const r of rows ?? []) {
+    const label = r.source_label?.trim();
+    if (!label || seen.has(label.toLowerCase())) continue;
+    seen.add(label.toLowerCase());
+    out.push(label);
+  }
+  return out;
+}
 
 /** The user's active accounts, with the currency the transfer form needs. */
 async function activePortfolios(userId: string) {
@@ -372,21 +414,40 @@ app.get("/incomes", async (req, reply) => {
   return { incomes: data ?? [] };
 });
 
-// Form options: the user's active accounts. Income sources are a fixed enum and
-// are labelled in the web layer, the same way portfolio categories are.
+// Form options: the user's active accounts, plus the custom source names they
+// have used before. The enum members themselves are a fixed list labelled in the
+// web layer, the same way portfolio categories are — only the user's own
+// additions have to come from the database.
 app.get("/incomes/options", async (req, reply) => {
   const userId = userIdOf(req, reply);
   if (!userId) return reply;
   const startedAt = process.hrtime.bigint();
 
-  const { data, error } = await activePortfolios(userId);
+  const [portfolios, labels] = await Promise.all([
+    activePortfolios(userId),
+    // Capped: this only feeds an autocomplete list, and a user with thousands of
+    // income rows would otherwise pull them all to find a handful of names.
+    admin()
+      .from("incomes")
+      .select("source_label")
+      .eq("user_id", userId) // service-role bypasses RLS — scope explicitly
+      .not("source_label", "is", null)
+      .order("created_at", { ascending: false })
+      .limit(200),
+  ]);
 
-  if (error) {
+  const { data, error } = portfolios;
+  if (error || labels.error) {
     req.log.error(
-      { userId, dbMs: since(startedAt), ...dbErrorFields(error) },
+      {
+        userId,
+        failed: error ? "portfolios" : "source_labels",
+        dbMs: since(startedAt),
+        ...dbErrorFields(error ?? labels.error),
+      },
       "ledger.incomes.options_failed",
     );
-    return reply.code(500).send({ error: error.message });
+    return reply.code(500).send({ error: (error ?? labels.error)?.message });
   }
 
   const count = data?.length ?? 0;
@@ -407,7 +468,7 @@ app.get("/incomes/options", async (req, reply) => {
     );
   }
 
-  return { portfolios: data ?? [] };
+  return { portfolios: data ?? [], source_labels: distinctLabels(labels.data) };
 });
 
 // Record income atomically via the create_income RPC.
@@ -421,17 +482,21 @@ app.post("/incomes", async (req, reply) => {
   const source = String(b.source ?? "");
   const txnDate = String(b.txn_date ?? "");
   const sourceName = b.source_name ? String(b.source_name) : null;
+  const sourceLabel = b.source_label ? String(b.source_label).trim() : "";
   const description = b.description ? String(b.description) : null;
   const isRecurring = b.is_recurring === true;
 
   // Free text (source_name/description) stays out of the logs — it is the
-  // user's private data and tells you nothing when debugging.
+  // user's private data and tells you nothing when debugging. sourceLabel is
+  // different: it names a source type, not a counterparty, and it is what
+  // makes an 'other' row readable.
   req.log.debug(
     {
       userId,
       amount,
       portfolioId,
       source,
+      sourceLabel: sourceLabel || null,
       txnDate,
       isRecurring,
       hasSourceName: sourceName !== null,
@@ -442,7 +507,7 @@ app.post("/incomes", async (req, reply) => {
 
   const invalid = (field: string, message: string) => {
     req.log.warn(
-      { userId, field, amount, portfolioId, source, txnDate },
+      { userId, field, amount, portfolioId, source, sourceLabel, txnDate },
       "ledger.income.create_invalid",
     );
     return reply.code(400).send({ error: message });
@@ -454,6 +519,18 @@ app.post("/incomes", async (req, reply) => {
     return invalid("portfolio_id", "Select an account.");
   if (!INCOME_SOURCES.has(source))
     return invalid("source", "Select where the money came from.");
+  // incomes_source_label_only_other enforces this too; rejecting it here turns
+  // a 23514 constraint violation into a sentence about the field.
+  if (sourceLabel && source !== "other")
+    return invalid(
+      "source_label",
+      'A custom source name only applies to the "Other" source.',
+    );
+  if (sourceLabel.length > MAX_CUSTOM_LABEL)
+    return invalid(
+      "source_label",
+      `Source name must be ${MAX_CUSTOM_LABEL} characters or fewer.`,
+    );
   if (!/^\d{4}-\d{2}-\d{2}$/.test(txnDate))
     return invalid("txn_date", "Date is required.");
 
@@ -467,6 +544,7 @@ app.post("/incomes", async (req, reply) => {
     _source_name: sourceName,
     _description: description,
     _is_recurring: isRecurring,
+    _source_label: sourceLabel || null,
   });
 
   if (error) {

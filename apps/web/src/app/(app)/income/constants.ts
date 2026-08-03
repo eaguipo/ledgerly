@@ -28,8 +28,34 @@ export const INCOME_SOURCE_VALUES: string[] = SELECTABLE_INCOME_SOURCES.map(
   (s) => s.value,
 );
 
+/**
+ * The enum member a user-named source is stored as. `income_source` is a
+ * Postgres enum that reporting groups by, so a typed-in source cannot become a
+ * new member — it becomes 'other' plus an `incomes.source_label`, which is what
+ * the UI shows. See db/functions/custom_option_labels.sql.
+ */
+export const CUSTOM_INCOME_SOURCE = "other";
+
+/**
+ * What the picker actually lists. 'other' is absent on purpose: it is reached
+ * by naming your own source instead, because a row labelled only "Other" tells
+ * you nothing when you come back to it a month later. Rows already stored as a
+ * bare 'other' still render as "Other" — see incomeSourceDisplay.
+ */
+export const PICKABLE_INCOME_SOURCES = SELECTABLE_INCOME_SOURCES.filter(
+  (s) => s.value !== CUSTOM_INCOME_SOURCE,
+);
+
 export function incomeSourceLabel(value: string): string {
   return INCOME_SOURCES.find((s) => s.value === value)?.label ?? value;
+}
+
+/** What to call an income row: the user's own name for it, or the enum's. */
+export function incomeSourceDisplay(
+  value: string,
+  label: string | null | undefined,
+): string {
+  return label?.trim() || incomeSourceLabel(value);
 }
 
 /** Placeholder for the "who paid you" field, which reads differently per source. */

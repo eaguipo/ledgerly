@@ -1,9 +1,10 @@
 "use client";
 
-import { useActionState, useEffect, useRef } from "react";
+import { useActionState } from "react";
 import { createExpense, type ExpenseFormState } from "./actions";
 import { Button } from "@/components/ui/button";
 import { Field, Input, Select } from "@/components/ui/field";
+import { ChoiceWithCustom } from "@/components/ui/choice-with-custom";
 import { Alert } from "@/components/ui/feedback";
 
 interface Category {
@@ -31,14 +32,39 @@ export function ExpenseForm({
   portfolios: Portfolio[];
 }) {
   const [state, action, pending] = useActionState(createExpense, initial);
-  const formRef = useRef<HTMLFormElement>(null);
 
-  useEffect(() => {
-    if (state.status === "success") formRef.current?.reset();
-  }, [state]);
-
+  // Clearing the form is a remount keyed on the new expense's id, matching
+  // /income and /portfolios. It used to be formRef.current.reset(), which only
+  // resets DOM inputs — the category picker now holds React state ("am I
+  // showing the new-category box?"), and reset() would leave that stranded
+  // open above a select that had snapped back to "Select category…".
   return (
-    <form ref={formRef} action={action} className="space-y-4">
+    <ExpenseFields
+      key={state.status === "success" ? state.expenseId : "entry"}
+      categories={categories}
+      portfolios={portfolios}
+      action={action}
+      pending={pending}
+      state={state}
+    />
+  );
+}
+
+function ExpenseFields({
+  categories,
+  portfolios,
+  action,
+  pending,
+  state,
+}: {
+  categories: Category[];
+  portfolios: Portfolio[];
+  action: (formData: FormData) => void;
+  pending: boolean;
+  state: ExpenseFormState;
+}) {
+  return (
+    <form action={action} className="space-y-4">
       <div className="grid grid-cols-2 gap-4">
         <Field label="Amount" htmlFor="amount">
           <Input
@@ -74,16 +100,23 @@ export function ExpenseForm({
         </Select>
       </Field>
 
-      <Field label="Category" htmlFor="category_id">
-        <Select id="category_id" name="category_id" required defaultValue="">
-          <option value="">Select category…</option>
-          {categories.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name}
-            </option>
-          ))}
-        </Select>
-      </Field>
+      {/* Unlike the account and income pickers, a category typed in here becomes
+          a real expense_categories row, so it is offered back in this list on
+          the next render — no separate "manage categories" screen needed. */}
+      <ChoiceWithCustom
+        label="Category"
+        name="category_id"
+        required
+        placeholder="Select category…"
+        options={categories.map((c) => ({ value: c.id, label: c.name }))}
+        addLabel="+ Add a new category…"
+        custom={{
+          name: "new_category",
+          label: "New category",
+          placeholder: "e.g. Pet care",
+          hint: "Saved to your category list when the expense is recorded.",
+        }}
+      />
 
       <Field label="Merchant" htmlFor="merchant" optional>
         <Input

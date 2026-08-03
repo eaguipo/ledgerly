@@ -3,9 +3,10 @@
 import { useActionState, useState } from "react";
 import { createIncome, type IncomeFormState } from "./actions";
 import Link from "next/link";
-import { SELECTABLE_INCOME_SOURCES, sourceNamePlaceholder } from "./constants";
+import { PICKABLE_INCOME_SOURCES, sourceNamePlaceholder } from "./constants";
 import { Button } from "@/components/ui/button";
 import { Checkbox, Field, Input, Select } from "@/components/ui/field";
+import { ChoiceWithCustom } from "@/components/ui/choice-with-custom";
 import { Alert } from "@/components/ui/feedback";
 
 interface Portfolio {
@@ -20,7 +21,13 @@ function todayIso() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-export function IncomeForm({ portfolios }: { portfolios: Portfolio[] }) {
+export function IncomeForm({
+  portfolios,
+  sourceLabels,
+}: {
+  portfolios: Portfolio[];
+  sourceLabels: string[];
+}) {
   const [state, action, pending] = useActionState(createIncome, initial);
 
   // Clearing the form is a remount, not a pile of setState calls in an effect:
@@ -30,6 +37,7 @@ export function IncomeForm({ portfolios }: { portfolios: Portfolio[] }) {
     <IncomeFields
       key={state.status === "success" ? state.incomeId : "entry"}
       portfolios={portfolios}
+      sourceLabels={sourceLabels}
       action={action}
       pending={pending}
       state={state}
@@ -39,11 +47,13 @@ export function IncomeForm({ portfolios }: { portfolios: Portfolio[] }) {
 
 function IncomeFields({
   portfolios,
+  sourceLabels,
   action,
   pending,
   state,
 }: {
   portfolios: Portfolio[];
+  sourceLabels: string[];
   action: (formData: FormData) => void;
   pending: boolean;
   state: IncomeFormState;
@@ -93,22 +103,26 @@ function IncomeFields({
         </Select>
       </Field>
 
-      <Field label="Source" htmlFor="source">
-        <Select
-          id="source"
-          name="source"
-          required
-          value={source}
-          onChange={(e) => setSource(e.target.value)}
-        >
-          <option value="">Select source…</option>
-          {SELECTABLE_INCOME_SOURCES.map((s) => (
-            <option key={s.value} value={s.value}>
-              {s.label}
-            </option>
-          ))}
-        </Select>
-      </Field>
+      {/* Naming your own source stores 'other' plus the name — the enum can't
+          grow members without a migration, and income reporting groups by it. */}
+      <ChoiceWithCustom
+        label="Source"
+        name="source"
+        required
+        placeholder="Select source…"
+        options={PICKABLE_INCOME_SOURCES.map((s) => ({
+          value: s.value,
+          label: s.label,
+        }))}
+        addLabel="+ Name my own source…"
+        custom={{
+          name: "source_label",
+          label: "Source name",
+          placeholder: "e.g. Royalties",
+          suggestions: sourceLabels,
+        }}
+        onValueChange={setSource}
+      />
 
       <Field
         label="From"

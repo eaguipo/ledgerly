@@ -4,7 +4,8 @@ import type { Metadata } from "next";
 import { createClient } from "@/lib/supabase/server";
 import { dbError, startTimer } from "@/lib/logger";
 import { requestLogger } from "@/lib/request-context";
-import { categoryLabel } from "./constants";
+import { categoryDisplay } from "./constants";
+import { distinctLabels } from "@/lib/custom-choice";
 import { PortfolioForm } from "./portfolio-form";
 import { createPortfolio, archivePortfolio, restorePortfolio } from "./actions";
 import { parseSort, sortColumn, sortHref, directionOf } from "./sorting";
@@ -26,6 +27,8 @@ interface PortfolioRow {
   id: string;
   name: string;
   category: string;
+  /** The user's own name for an 'others' account; null on the enum's members. */
+  category_label: string | null;
   currency_id: string;
   current_balance: number | string;
   is_savings: boolean;
@@ -76,7 +79,7 @@ export default async function PortfoliosPage({
   let portfoliosQuery = supabase
     .from("portfolios")
     .select(
-      "id, name, category, currency_id, current_balance, is_savings, is_liquid, is_archived, institution, currency:currencies(code, symbol, minor_unit)",
+      "id, name, category, category_label, currency_id, current_balance, is_savings, is_liquid, is_archived, institution, currency:currencies(code, symbol, minor_unit)",
     );
 
   for (const { column, ascending } of orderBy) {
@@ -116,6 +119,10 @@ export default async function PortfoliosPage({
   const rows = (portfolios ?? []) as PortfolioRow[];
   const active = rows.filter((p) => !p.is_archived);
   const archived = rows.filter((p) => p.is_archived);
+  // Names the user has already invented, offered back in the add form. Taken
+  // from the rows already fetched — including archived ones, since a category
+  // you named once is still a category you might reuse — rather than a query.
+  const customCategories = distinctLabels(rows.map((p) => p.category_label));
 
   pageLog.info("portfolios.load.ok", {
     active: active.length,
@@ -197,7 +204,7 @@ export default async function PortfoliosPage({
                     </Td>
                     <Td>
                       <span className="text-[13px] text-muted">
-                        {categoryLabel(p.category)}
+                        {categoryDisplay(p.category, p.category_label)}
                       </span>
                     </Td>
                     <Td align="right">
@@ -269,7 +276,7 @@ export default async function PortfoliosPage({
                     <Td>
                       <span className="text-muted">{p.name}</span>
                       <span className="ml-2 text-xs text-faint">
-                        {categoryLabel(p.category)}
+                        {categoryDisplay(p.category, p.category_label)}
                       </span>
                     </Td>
                     <Td align="right">
@@ -305,6 +312,7 @@ export default async function PortfoliosPage({
               action={createPortfolio}
               currencies={currencies ?? []}
               defaultCurrencyId={profile?.default_currency_id ?? undefined}
+              customCategories={customCategories}
               submitLabel="Add account"
             />
           </CardBody>

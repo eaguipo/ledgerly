@@ -6,10 +6,17 @@ import { createClient } from "@/lib/supabase/server";
 import { ledgerFetch } from "@/lib/ledger";
 import { startTimer } from "@/lib/logger";
 import { requestLogger } from "@/lib/request-context";
+import {
+  CUSTOM_CHOICE,
+  MAX_CUSTOM_LABEL,
+  normalizeCustomLabel,
+} from "@/lib/custom-choice";
 
 export type ExpenseFormState =
   | { status: "idle" }
-  | { status: "success" }
+  // `expenseId` doubles as the form's reset key: a new value per success
+  // remounts the fields, which is how the form clears itself.
+  | { status: "success"; expenseId: string }
   | { status: "error"; message: string };
 
 export async function createExpense(
@@ -32,18 +39,30 @@ export async function createExpense(
 
   const rawAmount = String(formData.get("amount") ?? "").trim();
   const portfolioId = String(formData.get("portfolio_id") ?? "").trim();
-  const categoryId = String(formData.get("category_id") ?? "").trim();
+  const rawCategory = String(formData.get("category_id") ?? "").trim();
   const txnDate = String(formData.get("txn_date") ?? "").trim();
   const description = String(formData.get("description") ?? "").trim() || null;
   const merchant = String(formData.get("merchant") ?? "").trim() || null;
 
+  // The picker sends either an existing category's id or the sentinel plus a
+  // typed name. create_expense() find-or-creates from the name inside the same
+  // transaction as the expense, so exactly one of these two is ever sent on.
+  const wantsNewCategory = rawCategory === CUSTOM_CHOICE;
+  const categoryId = wantsNewCategory ? null : rawCategory;
+  const newCategory = wantsNewCategory
+    ? normalizeCustomLabel(formData.get("new_category"))
+    : null;
+
   const actionLog = log.child({ userId: user.id });
   // Free text (merchant, description) is deliberately reduced to a flag: it is
-  // the user's own private data and adds nothing to a debugging session.
+  // the user's own private data and adds nothing to a debugging session. A new
+  // category name is a label the user will see in a shared list, not private
+  // detail, and knowing which one was created is the point of the log line.
   actionLog.debug("expense.create.start", {
     rawAmount,
     portfolioId,
     categoryId,
+    newCategory,
     txnDate,
     hasDescription: description !== null,
     hasMerchant: merchant !== null,
@@ -57,6 +76,7 @@ export async function createExpense(
       rawAmount,
       portfolioId,
       categoryId,
+      newCategory,
       txnDate,
       durationMs: elapsed(),
     });
@@ -66,7 +86,17 @@ export async function createExpense(
   if (!Number.isFinite(amount) || amount <= 0)
     return reject("amount", "Amount must be greater than zero.");
   if (!portfolioId) return reject("portfolio_id", "Select an account.");
-  if (!categoryId) return reject("category_id", "Select a category.");
+  if (wantsNewCategory) {
+    if (!newCategory)
+      return reject("new_category", "Name the new category.");
+    if (newCategory.length > MAX_CUSTOM_LABEL)
+      return reject(
+        "new_category",
+        `Category name must be ${MAX_CUSTOM_LABEL} characters or fewer.`,
+      );
+  } else if (!categoryId) {
+    return reject("category_id", "Select a category.");
+  }
   if (!txnDate) return reject("txn_date", "Date is required.");
 
   // The ledger microservice (via the api-gateway) owns writes to the ledger now.
@@ -80,6 +110,7 @@ export async function createExpense(
         amount,
         portfolio_id: portfolioId,
         category_id: categoryId,
+        new_category: newCategory,
         txn_date: txnDate,
         description,
         merchant,
@@ -103,6 +134,7 @@ export async function createExpense(
       amount,
       portfolioId,
       categoryId,
+      newCategory,
       txnDate,
       durationMs: elapsed(),
     };
@@ -117,10 +149,15 @@ export async function createExpense(
     return { status: "error", message: body?.error ?? "Failed to record expense." };
   }
 
-  // create_expense returns { expense_id, transaction_id } — log both, they are
-  // the handles for looking the row up in Supabase afterwards.
+  // create_expense returns { expense_id, transaction_id, category_id } — log
+  // all three, they are the handles for looking the rows up in Supabase
+  // afterwards. category_id is the only way to find a category the RPC created.
   const created = (await res.json().catch(() => null)) as {
-    expense?: { expense_id?: string; transaction_id?: string };
+    expense?: {
+      expense_id?: string;
+      transaction_id?: string;
+      category_id?: string;
+    };
   } | null;
 
   actionLog.info("expense.create.ok", {
@@ -128,11 +165,19 @@ export async function createExpense(
     transactionId: created?.expense?.transaction_id ?? null,
     amount,
     portfolioId,
-    categoryId,
+    categoryId: created?.expense?.category_id ?? categoryId,
+    createdCategory: newCategory,
     txnDate,
     durationMs: elapsed(),
   });
 
+  // A new category has to be back in the picker's options on the next render,
+  // which is the same revalidation the list already needed.
   revalidatePath("/expenses");
-  return { status: "success" };
+  // Fall back to a random id only so the reset key still changes if the service
+  // ever returns a success body without one.
+  return {
+    status: "success",
+    expenseId: created?.expense?.expense_id ?? crypto.randomUUID(),
+  };
 }
