@@ -2,7 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import type { Metadata } from "next";
 import { createClient } from "@/lib/supabase/server";
-import { gatewayFetch } from "@/lib/gateway";
+import { ledgerFetch } from "@/lib/ledger";
 import { startTimer } from "@/lib/logger";
 import { requestLogger } from "@/lib/request-context";
 import { ExpenseForm } from "./expense-form";
@@ -72,10 +72,11 @@ export default async function ExpensesPage() {
 
   const pageLog = log.child({ userId: user.id });
 
-  // Reads go through the api-gateway → ledger-service (no direct DB access).
+  // ledgerFetch picks the transport: the mesh when GATEWAY_URL is set, in-process
+  // handlers over RLS-scoped Supabase on the Vercel deploy. Same paths either way.
   const [optionsRes, listRes] = await Promise.all([
-    gatewayFetch("/ledger/expenses/options"),
-    gatewayFetch("/ledger/expenses?limit=30"),
+    ledgerFetch("/ledger/expenses/options"),
+    ledgerFetch("/ledger/expenses?limit=30"),
   ]);
 
   const options = optionsRes.ok
@@ -98,7 +99,7 @@ export default async function ExpensesPage() {
   const serviceError = !optionsRes.ok || !listRes.ok;
   const hasAccounts = portfolios.length > 0;
 
-  // gatewayFetch already logged each call; this line records what the PAGE
+  // ledgerFetch already logged each call; this line records what the PAGE
   // concluded from them — which of the two failed, and what the user ends up
   // seeing (a degraded page, an empty state, or the real list).
   if (serviceError) {

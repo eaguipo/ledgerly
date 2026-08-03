@@ -2,7 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import type { Metadata } from "next";
 import { createClient } from "@/lib/supabase/server";
-import { gatewayFetch } from "@/lib/gateway";
+import { ledgerFetch } from "@/lib/ledger";
 import { startTimer } from "@/lib/logger";
 import { requestLogger } from "@/lib/request-context";
 import { DebtForm } from "./debt-form";
@@ -125,12 +125,13 @@ export default async function DebtsPage() {
 
   const pageLog = log.child({ userId: user.id });
 
-  // Debt data goes through the api-gateway → ledger-service (no direct DB
+  // ledgerFetch picks the transport: the mesh when GATEWAY_URL is set, in-process
+  // handlers over RLS-scoped Supabase on the Vercel deploy (no direct DB
   // access). The profile is a plain preference, not ledger data, so it comes
   // straight off the RLS-scoped client the same way /portfolios reads it.
   const [optionsRes, listRes, { data: profile }] = await Promise.all([
-    gatewayFetch("/ledger/debts/options"),
-    gatewayFetch("/ledger/debts?limit=200"),
+    ledgerFetch("/ledger/debts/options"),
+    ledgerFetch("/ledger/debts?limit=200"),
     supabase.from("profiles").select("default_currency_id").eq("id", user.id).single(),
   ]);
 
