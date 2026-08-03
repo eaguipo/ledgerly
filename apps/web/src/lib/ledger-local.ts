@@ -56,6 +56,15 @@ const GOAL_SELECT =
   "currency:currencies(code, symbol, minor_unit), " +
   "linked_portfolio:portfolios!linked_portfolio_id(name, current_balance)";
 
+const INVESTMENT_SELECT =
+  "id, name, kind, kind_label, symbol, quantity, average_cost, invested_amount, " +
+  "current_value, unrealized_gain, opened_on, maturity_date, is_active, " +
+  "portfolio_id, created_at, currency:currencies(code, symbol, minor_unit), " +
+  "portfolio:portfolios(name)";
+
+const SNAPSHOT_SELECT =
+  "id, as_of_date, market_value, unit_price, quantity, source, created_at";
+
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -403,6 +412,159 @@ export async function localLedger(
       _note: body.note ?? null,
     });
     return done(error ? dbFail(error) : json({ contribution: data }, 201));
+  }
+
+  // ---- investments -------------------------------------------------------
+  // Nothing here moves money (Phase 4 decision D1) — an investment is a
+  // statement about what you hold and a snapshot is an observation of what it is
+  // worth, so no ledger row is posted on either path.
+  if (route === "/investments" && method === "GET") {
+    let q = sb.from("investments").select(INVESTMENT_SELECT);
+    if (url.searchParams.get("include_inactive") !== "true") {
+      q = q.eq("is_active", true);
+    }
+    const kind = url.searchParams.get("kind");
+    if (kind) q = q.eq("kind", kind);
+    const { data, error } = await q
+      .order("is_active", { ascending: false })
+      .order("created_at", { ascending: false })
+      .limit(limitOf(url));
+    return done(error ? dbFail(error) : json({ investments: data ?? [] }));
+  }
+
+  // Checked before the /investments/:id match below — "options" is a valid
+  // capture for that regex, and the order is what stops it being treated as one.
+  if (route === "/investments/options" && method === "GET") {
+    const [portfolios, currencies, labels] = await Promise.all([
+      activePortfolios(sb),
+      sb.from("currencies").select("id, code, symbol, minor_unit").eq("is_active", true).order("code"),
+      // Capped like the income form's suggestion list: this feeds autocomplete
+      // and must not scale with how many holdings someone has.
+      sb
+        .from("investments")
+        .select("kind_label")
+        .not("kind_label", "is", null)
+        .order("created_at", { ascending: false })
+        .limit(200),
+    ]);
+    const error = portfolios.error ?? currencies.error ?? labels.error;
+    return done(
+      error
+        ? dbFail(error)
+        : json({
+            portfolios: portfolios.data ?? [],
+            currencies: currencies.data ?? [],
+            kind_labels: distinctLabels(
+              (labels.data ?? []).map((r) => r.kind_label),
+            ),
+          }),
+    );
+  }
+
+  if (route === "/investments" && method === "POST") {
+    const { data, error } = await sb.rpc("do_investment", {
+      _name: body.name,
+      _kind: body.kind,
+      _currency_id: body.currency_id,
+      _invested_amount: body.invested_amount,
+      _symbol: body.symbol ?? null,
+      _quantity: body.quantity ?? null,
+      _average_cost: body.average_cost ?? null,
+      _opened_on: body.opened_on ?? null,
+      _maturity_date: body.maturity_date ?? null,
+      _portfolio_id: body.portfolio_id ?? null,
+      // Only ever set alongside kind='other_asset' — the DB check constraint and
+      // the RPC both reject it on any other kind.
+      _kind_label: body.kind_label ?? null,
+    });
+    return done(error ? dbFail(error) : json({ investment: data }, 201));
+  }
+
+  const investmentId = route.match(/^\/investments\/([^/]+)$/)?.[1];
+  const snapshotsFor = route.match(/^\/investments\/([^/]+)\/snapshots$/)?.[1];
+
+  if (investmentId && method === "GET") {
+    if (!UUID_RE.test(investmentId))
+      return done(json({ error: "Invalid investment id." }, 400));
+    const [investment, snapshots] = await Promise.all([
+      sb.from("investments").select(INVESTMENT_SELECT).eq("id", investmentId).maybeSingle(),
+      sb
+        .from("investment_snapshots")
+        .select(SNAPSHOT_SELECT)
+        .eq("investment_id", investmentId)
+        .order("as_of_date", { ascending: false })
+        .order("created_at", { ascending: false })
+        .limit(200),
+    ]);
+    const error = investment.error ?? snapshots.error;
+    if (error) return done(dbFail(error));
+    if (!investment.data) return done(json({ error: "Investment not found." }, 404));
+    return done(
+      json({ investment: investment.data, snapshots: snapshots.data ?? [] }),
+    );
+  }
+
+  if (investmentId && method === "PATCH") {
+    if (!UUID_RE.test(investmentId))
+      return done(json({ error: "Invalid investment id." }, 400));
+    // Allow-listed rather than passing the body straight through, unlike the
+    // debts and goals handlers above. Two columns here must never be written by
+    // a caller: `current_value` is owned by sync_investment_current_value() and
+    // an update would silently revert on the next snapshot, and
+    // `unrealized_gain` is GENERATED and would raise. The ledger route builds
+    // its patch field by field for the same reason, and the two transports have
+    // to accept the same things or a write works on one deploy and not the
+    // other.
+    const PATCHABLE = [
+      "name",
+      "kind",
+      "kind_label",
+      "symbol",
+      "invested_amount",
+      "quantity",
+      "average_cost",
+      "maturity_date",
+      "portfolio_id",
+      "is_active",
+    ] as const;
+    const patch: Record<string, unknown> = {};
+    for (const field of PATCHABLE) {
+      if (body[field] !== undefined) patch[field] = body[field];
+    }
+    // Re-classifying away from the catch-all kind has to clear kind_label in the
+    // SAME statement, or investment_kind_label_only_other rejects the update.
+    if (
+      typeof patch.kind === "string" &&
+      patch.kind !== "other_asset" &&
+      body.kind_label === undefined
+    ) {
+      patch.kind_label = null;
+    }
+    if (Object.keys(patch).length === 0)
+      return done(json({ error: "Nothing to update." }, 400));
+    const { data, error } = await sb
+      .from("investments")
+      .update(patch)
+      .eq("id", investmentId)
+      .select(INVESTMENT_SELECT)
+      .maybeSingle();
+    if (error) return done(dbFail(error));
+    if (!data) return done(json({ error: "Investment not found." }, 404));
+    return done(json({ investment: data }));
+  }
+
+  if (snapshotsFor && method === "POST") {
+    if (!UUID_RE.test(snapshotsFor))
+      return done(json({ error: "Invalid investment id." }, 400));
+    const { data, error } = await sb.rpc("do_investment_snapshot", {
+      _investment_id: snapshotsFor,
+      _market_value: body.market_value,
+      _as_of_date: body.as_of_date,
+      _unit_price: body.unit_price ?? null,
+      _quantity: body.quantity ?? null,
+      _source: body.source ?? null,
+    });
+    return done(error ? dbFail(error) : json({ snapshot: data }, 201));
   }
 
   callLog.warn("ledger.local.unknown_route", { method, route });

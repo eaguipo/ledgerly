@@ -354,16 +354,19 @@ const INCOME_SOURCES = new Set([
 ]);
 
 /**
- * The custom source names this user has typed before, newest first, so the
- * income form can offer them back instead of making them retype. Deduped
- * case-insensitively — "Royalties" and "royalties" are one suggestion.
- * Mirrors distinctLabels in apps/web/src/lib/ledger-local.ts.
+ * The custom names this user has typed before, newest first, so a form can offer
+ * them back instead of making them retype. Deduped case-insensitively —
+ * "Royalties" and "royalties" are one suggestion.
+ *
+ * Takes bare values rather than rows because two different columns feed it now
+ * (incomes.source_label, investments.kind_label). Mirrors distinctLabels in
+ * apps/web/src/lib/custom-choice.ts, which has the same signature.
  */
-function distinctLabels(rows: { source_label: string | null }[] | null): string[] {
+function distinctLabels(values: (string | null | undefined)[] | null): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
-  for (const r of rows ?? []) {
-    const label = r.source_label?.trim();
+  for (const value of values ?? []) {
+    const label = value?.trim();
     if (!label || seen.has(label.toLowerCase())) continue;
     seen.add(label.toLowerCase());
     out.push(label);
@@ -468,7 +471,10 @@ app.get("/incomes/options", async (req, reply) => {
     );
   }
 
-  return { portfolios: data ?? [], source_labels: distinctLabels(labels.data) };
+  return {
+    portfolios: data ?? [],
+    source_labels: distinctLabels((labels.data ?? []).map((r) => r.source_label)),
+  };
 });
 
 // Record income atomically via the create_income RPC.
@@ -1673,6 +1679,532 @@ app.post("/goals/:id/contributions", async (req, reply) => {
     "ledger.goal_contribution.create_ok",
   );
   return reply.code(201).send({ contribution: data });
+});
+
+// ---------------------------------------------------------------------------
+// INVESTMENTS (Phase 4)
+//
+// Nothing here moves money (decision D1). An investment is a statement about
+// what you hold; a snapshot is an observation of what it is worth. Neither posts
+// a ledger row, and `portfolio_id` is an informational "funded from" link rather
+// than a movement — which is why these routes never revalidate a balance and why
+// there is no overdraft guard anywhere below.
+// ---------------------------------------------------------------------------
+
+// Investments carry their own currency (like debts, and unlike expenses, which
+// inherit it from a portfolio), so the currency embed is not optional.
+const INVESTMENT_SELECT =
+  "id, name, kind, kind_label, symbol, quantity, average_cost, invested_amount, " +
+  "current_value, unrealized_gain, opened_on, maturity_date, is_active, " +
+  "portfolio_id, created_at, currency:currencies(code, symbol, minor_unit), " +
+  "portfolio:portfolios(name)";
+
+const SNAPSHOT_SELECT =
+  "id, as_of_date, market_value, unit_price, quantity, source, created_at";
+
+/** Mirrors public.investment_kind. */
+const INVESTMENT_KINDS = new Set([
+  "mp2",
+  "crypto",
+  "stock",
+  "mutual_fund",
+  "bond",
+  "real_estate",
+  "other_asset",
+]);
+
+/** Holdings the user tracks. Closed ones are hidden unless asked for. */
+app.get("/investments", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+  const q = req.query as { kind?: string; include_inactive?: string; limit?: string };
+  const limit = Math.min(Math.max(Number(q.limit) || 100, 1), 200);
+  const includeInactive = q.include_inactive === "true";
+  const startedAt = process.hrtime.bigint();
+
+  let query = admin()
+    .from("investments")
+    .select(INVESTMENT_SELECT)
+    .eq("user_id", userId) // service-role bypasses RLS — this is the boundary
+    .limit(limit);
+
+  if (!includeInactive) query = query.eq("is_active", true);
+  if (q.kind && INVESTMENT_KINDS.has(q.kind)) query = query.eq("kind", q.kind);
+
+  const { data, error } = await query
+    .order("is_active", { ascending: false })
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    req.log.error(
+      { userId, limit, dbMs: since(startedAt), ...dbErrorFields(error) },
+      "ledger.investments.list_failed",
+    );
+    return reply.code(500).send({ error: error.message });
+  }
+
+  req.log.debug(
+    { userId, limit, returned: data?.length ?? 0, dbMs: since(startedAt) },
+    "ledger.investments.list_ok",
+  );
+  return { investments: data ?? [] };
+});
+
+// Form options: currencies, active accounts (for the optional funding link) and
+// the custom type names this user has already typed, for autocomplete.
+app.get("/investments/options", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+  const startedAt = process.hrtime.bigint();
+
+  const [portfolios, currencies, labels] = await Promise.all([
+    activePortfolios(userId),
+    admin()
+      .from("currencies")
+      .select("id, code, symbol, minor_unit")
+      .eq("is_active", true)
+      .order("code"),
+    // Capped for the same reason the income form's list is: this only feeds an
+    // autocomplete, and it must not scale with how many holdings someone has.
+    admin()
+      .from("investments")
+      .select("kind_label")
+      .eq("user_id", userId)
+      .not("kind_label", "is", null)
+      .order("created_at", { ascending: false })
+      .limit(200),
+  ]);
+
+  if (portfolios.error || currencies.error || labels.error) {
+    const error = portfolios.error ?? currencies.error ?? labels.error;
+    req.log.error(
+      {
+        userId,
+        failed: portfolios.error ? "portfolios" : currencies.error ? "currencies" : "labels",
+        dbMs: since(startedAt),
+        ...dbErrorFields(error),
+      },
+      "ledger.investments.options_failed",
+    );
+    return reply.code(500).send({ error: error?.message });
+  }
+
+  req.log.debug(
+    {
+      userId,
+      portfolios: portfolios.data?.length ?? 0,
+      currencies: currencies.data?.length ?? 0,
+      dbMs: since(startedAt),
+    },
+    "ledger.investments.options_ok",
+  );
+  return {
+    portfolios: portfolios.data ?? [],
+    currencies: currencies.data ?? [],
+    kind_labels: distinctLabels((labels.data ?? []).map((r) => r.kind_label)),
+  };
+});
+
+/** One holding plus its valuation history, newest first. */
+app.get("/investments/:id", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+  const { id } = req.params as { id: string };
+  if (!UUID_RE.test(id))
+    return reply.code(400).send({ error: "Invalid investment id." });
+  const startedAt = process.hrtime.bigint();
+
+  const [investment, snapshots] = await Promise.all([
+    admin()
+      .from("investments")
+      .select(INVESTMENT_SELECT)
+      .eq("user_id", userId)
+      .eq("id", id)
+      .maybeSingle(),
+    admin()
+      .from("investment_snapshots")
+      .select(SNAPSHOT_SELECT)
+      .eq("user_id", userId)
+      .eq("investment_id", id)
+      .order("as_of_date", { ascending: false })
+      .order("created_at", { ascending: false })
+      .limit(200),
+  ]);
+
+  if (investment.error || snapshots.error) {
+    const error = investment.error ?? snapshots.error;
+    req.log.error(
+      {
+        userId,
+        investmentId: id,
+        failed: investment.error ? "investment" : "snapshots",
+        dbMs: since(startedAt),
+        ...dbErrorFields(error),
+      },
+      "ledger.investments.get_failed",
+    );
+    return reply.code(500).send({ error: error?.message });
+  }
+
+  // Someone else's holding is indistinguishable from one that does not exist.
+  if (!investment.data) {
+    req.log.warn({ userId, investmentId: id }, "ledger.investments.get_not_found");
+    return reply.code(404).send({ error: "Investment not found." });
+  }
+
+  req.log.debug(
+    {
+      userId,
+      investmentId: id,
+      snapshots: snapshots.data?.length ?? 0,
+      dbMs: since(startedAt),
+    },
+    "ledger.investments.get_ok",
+  );
+  return { investment: investment.data, snapshots: snapshots.data ?? [] };
+});
+
+// Record a holding via the create_investment RPC.
+app.post("/investments", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+
+  const b = (req.body ?? {}) as Record<string, unknown>;
+  const name = String(b.name ?? "").trim();
+  const kind = String(b.kind ?? "");
+  const currencyId = String(b.currency_id ?? "");
+  const invested = Number(b.invested_amount);
+  const symbol = b.symbol ? String(b.symbol).trim() : null;
+  const optionalNumber = (v: unknown) =>
+    v === undefined || v === null || v === "" ? null : Number(v);
+  const quantity = optionalNumber(b.quantity);
+  const averageCost = optionalNumber(b.average_cost);
+  const openedOn = b.opened_on ? String(b.opened_on) : null;
+  const maturityDate = b.maturity_date ? String(b.maturity_date) : null;
+  const portfolioId = b.portfolio_id ? String(b.portfolio_id) : null;
+  const kindLabel = b.kind_label ? String(b.kind_label).trim() : null;
+
+  req.log.debug(
+    {
+      userId,
+      nameLength: name.length,
+      kind,
+      currencyId,
+      invested,
+      linked: portfolioId !== null,
+      custom: kindLabel !== null,
+    },
+    "ledger.investment.create_start",
+  );
+
+  const invalid = (field: string, message: string) => {
+    req.log.warn(
+      { userId, field, kind, currencyId, invested },
+      "ledger.investment.create_invalid",
+    );
+    return reply.code(400).send({ error: message });
+  };
+
+  if (!name) return invalid("name", "Give the investment a name.");
+  if (!INVESTMENT_KINDS.has(kind)) return invalid("kind", "Choose a type.");
+  if (!UUID_RE.test(currencyId)) return invalid("currency_id", "Select a currency.");
+  // Zero is allowed: an asset you were given still has a value worth tracking,
+  // and the return % is NULL rather than a division by zero (create_investment).
+  if (!Number.isFinite(invested) || invested < 0)
+    return invalid("invested_amount", "Amount invested cannot be negative.");
+  if (quantity !== null && (!Number.isFinite(quantity) || quantity < 0))
+    return invalid("quantity", "Quantity cannot be negative.");
+  if (averageCost !== null && (!Number.isFinite(averageCost) || averageCost < 0))
+    return invalid("average_cost", "Average cost cannot be negative.");
+  if (openedOn !== null && !/^\d{4}-\d{2}-\d{2}$/.test(openedOn))
+    return invalid("opened_on", "Opened date is not a valid date.");
+  if (maturityDate !== null && !/^\d{4}-\d{2}-\d{2}$/.test(maturityDate))
+    return invalid("maturity_date", "Maturity date is not a valid date.");
+  if (portfolioId !== null && !UUID_RE.test(portfolioId))
+    return invalid("portfolio_id", "Select a valid account.");
+  // The DB constraint and the RPC both reject a label on any other kind; caught
+  // here so the message names the field instead of a constraint.
+  if (kindLabel !== null && kind !== "other_asset")
+    return invalid("kind_label", 'A custom type name only applies to the "Other" type.');
+  if (kindLabel !== null && kindLabel.length > MAX_CUSTOM_LABEL)
+    return invalid(
+      "kind_label",
+      `Type name must be ${MAX_CUSTOM_LABEL} characters or fewer.`,
+    );
+
+  const startedAt = process.hrtime.bigint();
+  const { data, error } = await admin().rpc("create_investment", {
+    _user_id: userId,
+    _name: name,
+    _kind: kind,
+    _currency_id: currencyId,
+    _invested_amount: invested,
+    _symbol: symbol,
+    _quantity: quantity,
+    _average_cost: averageCost,
+    _opened_on: openedOn,
+    _maturity_date: maturityDate,
+    _portfolio_id: portfolioId,
+    _kind_label: kindLabel,
+  });
+
+  if (error) {
+    // Most often the funding account holding a different currency from the
+    // holding — a guard doing its job, hence 400.
+    req.log.warn(
+      {
+        userId,
+        kind,
+        currencyId,
+        invested,
+        linked: portfolioId !== null,
+        dbMs: since(startedAt),
+        ...dbErrorFields(error),
+      },
+      "ledger.investment.create_rejected",
+    );
+    return reply.code(400).send({ error: error.message });
+  }
+
+  const created = (data ?? {}) as { investment_id?: string };
+  req.log.info(
+    {
+      userId,
+      investmentId: created.investment_id,
+      kind,
+      currencyId,
+      invested,
+      linked: portfolioId !== null,
+      custom: kindLabel !== null,
+      dbMs: since(startedAt),
+    },
+    "ledger.investment.create_ok",
+  );
+  return reply.code(201).send({ investment: data });
+});
+
+// Edit a holding's descriptive fields, its cost basis, or close it.
+//
+// current_value is deliberately NOT patchable: it is owned by
+// sync_investment_current_value() from the first snapshot onward, so a value set
+// here would silently revert on the next valuation. Post a snapshot instead.
+// unrealized_gain is a generated column and cannot be written at all.
+app.patch("/investments/:id", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+  const { id } = req.params as { id: string };
+  if (!UUID_RE.test(id))
+    return reply.code(400).send({ error: "Invalid investment id." });
+
+  const b = (req.body ?? {}) as Record<string, unknown>;
+  const patch: Record<string, unknown> = {};
+
+  const invalid = (field: string, message: string) => {
+    req.log.warn({ userId, investmentId: id, field }, "ledger.investment.update_invalid");
+    return reply.code(400).send({ error: message });
+  };
+
+  if (b.name !== undefined) {
+    const name = String(b.name).trim();
+    if (!name) return invalid("name", "Give the investment a name.");
+    patch.name = name;
+  }
+  if (b.kind !== undefined) {
+    const kind = String(b.kind);
+    if (!INVESTMENT_KINDS.has(kind)) return invalid("kind", "Choose a type.");
+    patch.kind = kind;
+    // Re-classifying away from the catch-all has to clear the label in the SAME
+    // statement, or investment_kind_label_only_other rejects the update and the
+    // user sees a constraint name. The check constraint is what makes this
+    // necessary — and what makes forgetting it loud rather than silent.
+    if (kind !== "other_asset" && b.kind_label === undefined) patch.kind_label = null;
+  }
+  if (b.kind_label !== undefined) {
+    const raw = b.kind_label === null ? null : String(b.kind_label).trim();
+    const label = raw === "" ? null : raw;
+    if (label !== null && label.length > MAX_CUSTOM_LABEL)
+      return invalid(
+        "kind_label",
+        `Type name must be ${MAX_CUSTOM_LABEL} characters or fewer.`,
+      );
+    patch.kind_label = label;
+  }
+  if (b.symbol !== undefined) {
+    const symbol = String(b.symbol ?? "").trim();
+    patch.symbol = symbol === "" ? null : symbol;
+  }
+  if (b.invested_amount !== undefined) {
+    const invested = Number(b.invested_amount);
+    if (!Number.isFinite(invested) || invested < 0)
+      return invalid("invested_amount", "Amount invested cannot be negative.");
+    patch.invested_amount = invested;
+  }
+  if (b.quantity !== undefined) {
+    const quantity = b.quantity === null || b.quantity === "" ? null : Number(b.quantity);
+    if (quantity !== null && (!Number.isFinite(quantity) || quantity < 0))
+      return invalid("quantity", "Quantity cannot be negative.");
+    patch.quantity = quantity;
+  }
+  if (b.average_cost !== undefined) {
+    const averageCost =
+      b.average_cost === null || b.average_cost === "" ? null : Number(b.average_cost);
+    if (averageCost !== null && (!Number.isFinite(averageCost) || averageCost < 0))
+      return invalid("average_cost", "Average cost cannot be negative.");
+    patch.average_cost = averageCost;
+  }
+  if (b.maturity_date !== undefined) {
+    const maturity =
+      b.maturity_date === null || b.maturity_date === "" ? null : String(b.maturity_date);
+    if (maturity !== null && !/^\d{4}-\d{2}-\d{2}$/.test(maturity))
+      return invalid("maturity_date", "Maturity date is not a valid date.");
+    patch.maturity_date = maturity;
+  }
+  if (b.portfolio_id !== undefined) {
+    const portfolioId =
+      b.portfolio_id === null || b.portfolio_id === "" ? null : String(b.portfolio_id);
+    if (portfolioId !== null && !UUID_RE.test(portfolioId))
+      return invalid("portfolio_id", "Select a valid account.");
+    patch.portfolio_id = portfolioId;
+  }
+  if (b.is_active !== undefined) patch.is_active = b.is_active === true;
+
+  if (Object.keys(patch).length === 0) return invalid("body", "Nothing to update.");
+
+  const startedAt = process.hrtime.bigint();
+  const { data, error } = await admin()
+    .from("investments")
+    .update(patch)
+    .eq("user_id", userId)
+    .eq("id", id)
+    .select(INVESTMENT_SELECT)
+    .maybeSingle();
+
+  if (error) {
+    req.log.warn(
+      {
+        userId,
+        investmentId: id,
+        fields: Object.keys(patch),
+        dbMs: since(startedAt),
+        ...dbErrorFields(error),
+      },
+      "ledger.investment.update_rejected",
+    );
+    return reply.code(400).send({ error: error.message });
+  }
+  if (!data) {
+    req.log.warn({ userId, investmentId: id }, "ledger.investment.update_not_found");
+    return reply.code(404).send({ error: "Investment not found." });
+  }
+
+  req.log.info(
+    {
+      userId,
+      investmentId: id,
+      fields: Object.keys(patch),
+      dbMs: since(startedAt),
+    },
+    "ledger.investment.update_ok",
+  );
+  return { investment: data };
+});
+
+// Record what a holding is worth today (record_investment_snapshot).
+//
+// No DELETE route for investments, and none for snapshots either. investments →
+// investment_snapshots is `on delete cascade`, so deleting a holding throws away
+// the valuation history that is the entire record of how it performed. Closing
+// it (is_active = false) is the same archive-not-delete rule debts and goals
+// already follow.
+app.post("/investments/:id/snapshots", async (req, reply) => {
+  const userId = userIdOf(req, reply);
+  if (!userId) return reply;
+  const { id } = req.params as { id: string };
+  if (!UUID_RE.test(id))
+    return reply.code(400).send({ error: "Invalid investment id." });
+
+  const b = (req.body ?? {}) as Record<string, unknown>;
+  const marketValue = Number(b.market_value);
+  const asOfDate = String(b.as_of_date ?? "");
+  const optionalNumber = (v: unknown) =>
+    v === undefined || v === null || v === "" ? null : Number(v);
+  const unitPrice = optionalNumber(b.unit_price);
+  const quantity = optionalNumber(b.quantity);
+  const source = b.source ? String(b.source).trim() : null;
+
+  req.log.debug(
+    { userId, investmentId: id, marketValue, asOfDate },
+    "ledger.investment_snapshot.create_start",
+  );
+
+  const invalid = (field: string, message: string) => {
+    req.log.warn(
+      { userId, investmentId: id, field, marketValue, asOfDate },
+      "ledger.investment_snapshot.create_invalid",
+    );
+    return reply.code(400).send({ error: message });
+  };
+
+  if (!Number.isFinite(marketValue) || marketValue < 0)
+    return invalid("market_value", "Value cannot be negative.");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(asOfDate))
+    return invalid("as_of_date", "Date is required.");
+  if (unitPrice !== null && (!Number.isFinite(unitPrice) || unitPrice < 0))
+    return invalid("unit_price", "Unit price cannot be negative.");
+  if (quantity !== null && (!Number.isFinite(quantity) || quantity < 0))
+    return invalid("quantity", "Quantity cannot be negative.");
+
+  const startedAt = process.hrtime.bigint();
+  const { data, error } = await admin().rpc("record_investment_snapshot", {
+    _user_id: userId,
+    _investment_id: id,
+    _market_value: marketValue,
+    _as_of_date: asOfDate,
+    _unit_price: unitPrice,
+    _quantity: quantity,
+    _source: source,
+  });
+
+  if (error) {
+    // The future-date guard and the closed-investment guard both land here as
+    // P0001 raises — user-facing, hence 400.
+    req.log.warn(
+      {
+        userId,
+        investmentId: id,
+        marketValue,
+        asOfDate,
+        dbMs: since(startedAt),
+        ...dbErrorFields(error),
+      },
+      "ledger.investment_snapshot.create_rejected",
+    );
+    return reply.code(400).send({ error: error.message });
+  }
+
+  const created = (data ?? {}) as {
+    snapshot_id?: string;
+    current_value?: string;
+    return_pct?: string | null;
+    is_latest?: boolean;
+  };
+  req.log.info(
+    {
+      userId,
+      investmentId: id,
+      snapshotId: created.snapshot_id,
+      marketValue,
+      asOfDate,
+      currentAfter: created.current_value,
+      returnPct: created.return_pct ?? null,
+      // False means an older date was back-filled behind a newer snapshot: saved,
+      // but the headline figure deliberately did not move.
+      isLatest: created.is_latest ?? true,
+      dbMs: since(startedAt),
+    },
+    "ledger.investment_snapshot.create_ok",
+  );
+  return reply.code(201).send({ snapshot: data });
 });
 
 installProcessLogging(app);

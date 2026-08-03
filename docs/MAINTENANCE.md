@@ -88,8 +88,14 @@ personal-finance-tracker/
     ├── cashflow_excludes_debt_origination.sql  keeps borrowing/lending out of inflow-outflow
     ├── create_goal.sql            goal + linked-account currency check (no money moves)
     ├── create_goal_contribution.sql  earmark/withdraw, plus the over-withdrawal guard
+    ├── create_investment.sql      holding + funding-account currency check (no money
+    │                              moves); adds investments.kind_label and re-creates
+    │                              v_investment_performance to select it
+    ├── record_investment_snapshot.sql  valuation upsert; rejects future dates and
+    │                              derives currency from the parent holding
     ├── authenticated_entry_points.sql  do_income/do_expense/do_debt/do_goal/
-    │                                   do_goal_contribution — the RLS-path wrappers
+    │                                   do_goal_contribution/do_investment/
+    │                                   do_investment_snapshot — the RLS-path wrappers
     │                                   the Vercel deploy writes through
     └── custom_option_labels.sql    user-supplied options: the two label columns,
                                     plus create_expense/create_income/do_expense/
@@ -102,7 +108,9 @@ Two kinds of file live in `db/functions/`, and they behave differently:
   knows nothing about them; they are applied by hand after it.
 - **Redefinitions of something `schema.sql` already creates** — currently
   `debt_principal_recompute.sql` (§15c triggers), `cashflow_excludes_debt_origination.sql`
-  (§19 views), and the `alter table` half of `custom_option_labels.sql` (§7/§10 columns).
+  (§19 views), the `alter table` half of `custom_option_labels.sql` (§7/§10 columns), and
+  `create_investment.sql`, which is both kinds at once: a new RPC *plus* the
+  `investments.kind_label` column (§12) and a re-created `v_investment_performance` (§19).
   These **must be kept byte-identical to `schema.sql`**, because re-running
   `schema.sql` on a live database would otherwise silently revert them.
 
@@ -197,12 +205,18 @@ Key mechanics:
 - **`portfolios.current_balance` is a trigger-maintained cache** of the ledger, kept by
   `apply_txn_to_balance()`. `reconcile_portfolio_balances()` rebuilds it from the ledger if it ever
   drifts. Reads use the cache; the overdraft guard uses the cache under `SELECT … FOR UPDATE`.
+- **`portfolios.opening_balance` is not authoritative and must never be summed** (DECISIONS-NEEDED
+  #6). A starting balance is an `opening_balance` *ledger row*, posted by `createPortfolio`, and
+  that row is what the cache and the reconcile function derive from. The column is a written-once
+  note of what the account opened at — nothing reads it and no later edit maintains it. Adding it
+  to any balance double-counts the ledger row it duplicates.
 - **Guards fire on `transactions`, not on the API.** `txn_overdraft_guard()` blocks any outflow that
   would push a non-`allow_negative` portfolio below zero, whatever wrote it.
   `txn_enforce_currency()` requires the transaction currency to match the portfolio's.
 - **Money RPCs are the write path for anything multi-row**: `create_expense()`, `create_income()`,
   `create_transfer()`, `create_debt()`, `create_debt_payment()`, `create_goal()`,
-  `create_goal_contribution()`, `do_transfer()`, `do_debt_payment()`. Each runs in one transaction
+  `create_goal_contribution()`, `create_investment()`, `record_investment_snapshot()`,
+  `do_transfer()`, `do_debt_payment()`. Each runs in one transaction
   and locks what it needs. Clients cannot write `transfers`, `debt_payments` or
   `goal_contributions` directly.
 - **Two RPC dialects, and picking the wrong one fails confusingly.** The older `do_*` functions read
@@ -221,6 +235,23 @@ Key mechanics:
   guards overpayment.** `apply_goal_contribution()` sets `current_amount = greatest(sum(amount), 0)`,
   so taking back more than is set aside clamps the cached total at zero while the underlying sum
   goes negative — and every later contribution is then measured from a phantom deficit.
+- **Investments move no money either** (Phase 4, decision D1). Recording a holding is a statement
+  about what you own and a snapshot is an observation of what it is worth; neither posts a ledger
+  row, and `investments.portfolio_id` is a "funded from" note rather than a movement — which is why
+  the table has no `transaction_id` at all. Buying something is an Expense or a Transfer you record
+  separately, and gains stay unrealised until you sell.
+- **`investments.current_value` belongs to the snapshot trigger, not to callers.**
+  `sync_investment_current_value()` copies the market value of the snapshot with the NEWEST
+  `as_of_date` onto it, so a value written any other way silently reverts on the next valuation. The
+  `/investments` PATCH route (both transports) allow-lists columns specifically to exclude it, along
+  with the generated `unrealized_gain`. `record_investment_snapshot` is the only supported way to
+  move it, and it rejects future dates because one mistyped year would win that newest-date race
+  permanently — no later real valuation could ever displace it.
+- **Investment valuations are one row per day.** `uq_inv_snap_inv_date` is unique on
+  `(investment_id, as_of_date)`, so "correct today's value" is an upsert; an insert raises 23505 and
+  loses the correction. The snapshot's currency is taken from the parent holding rather than the
+  caller — `investment_snapshots` has no equivalent of `txn_enforce_currency()`, so a USD valuation
+  on a PHP holding would otherwise be accepted and corrupt `current_value`.
 - **`create_debt_payment` is not a pure port.** It adds guards `do_debt_payment` never had: an
   overpayment is rejected rather than silently absorbed by `greatest(principal − paid, 0)`, and a
   settled or archived debt refuses payment. A *written-off* debt still accepts one — recovering on a

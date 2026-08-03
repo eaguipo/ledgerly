@@ -171,6 +171,12 @@ create table public.portfolios (
   category_label  text,
   currency_id     uuid not null references public.currencies(id),
   purpose_tag_id  uuid references public.money_purpose_tags(id) on delete set null,
+  -- NOT AUTHORITATIVE, and never to be summed into anything (DECISIONS-NEEDED
+  -- #6). A starting balance is modelled as an 'opening_balance' LEDGER ROW, and
+  -- that row is what current_balance and reconcile_portfolio_balances() are
+  -- derived from. This column is a written-once note of what the account opened
+  -- at: createPortfolio sets it, nothing reads it, and no later edit maintains
+  -- it. Adding it to a balance would double-count the ledger row.
   opening_balance numeric(38,18) not null default 0,
   current_balance numeric(38,18) not null default 0,
   institution     text,
@@ -413,6 +419,12 @@ create table public.investments (
   portfolio_id    uuid references public.portfolios(id) on delete set null,
   name            text not null,
   kind            public.investment_kind not null,
+  -- Free-text name for a holding the seven enum members don't describe (gold,
+  -- a vehicle, a collectible). Only ever set alongside kind='other_asset', so
+  -- v_investment_performance and every by-kind rollup keep working — see
+  -- db/functions/create_investment.sql, and portfolios.category_label for the
+  -- same pattern applied to accounts.
+  kind_label      text,
   symbol          text,
   quantity        numeric(28,8),
   average_cost    numeric(28,8),
@@ -426,7 +438,13 @@ create table public.investments (
   created_at      timestamptz not null default now(),
   updated_at      timestamptz not null default now(),
   constraint investment_name_not_blank  check (char_length(trim(name)) > 0),
-  constraint investment_invested_nonneg check (invested_amount >= 0)
+  constraint investment_invested_nonneg check (invested_amount >= 0),
+  -- Pins the label to the catch-all member: re-classifying a holding away from
+  -- 'other_asset' must clear its custom name rather than leave a stale one.
+  constraint investment_kind_label_only_other check (
+    kind_label is null
+    or (kind = 'other_asset' and char_length(btrim(kind_label)) between 1 and 40)
+  )
 );
 create index idx_investments_user on public.investments(user_id);
 create index idx_investments_user_kind on public.investments(user_id, kind);
@@ -944,9 +962,16 @@ create or replace view public.v_completed_goals
   from public.goals g join public.currencies c on c.id = g.currency_id
   where g.first_achieved_at is not null;   -- ever-achieved survives later withdrawals
 
+-- Kept byte-identical to the copy in db/functions/create_investment.sql, which
+-- re-creates this view to add kind_label on an already-deployed database. If the
+-- two drift, re-running schema.sql silently reverts the column.
 create or replace view public.v_investment_performance
   with (security_invoker = true) as
-  select i.user_id, i.id as investment_id, i.name, i.kind, i.symbol, i.invested_amount, i.current_value, i.unrealized_gain,
-         case when i.invested_amount > 0 then round((i.current_value - i.invested_amount) / i.invested_amount * 100, 2) else null end as return_pct,
+  select i.user_id, i.id as investment_id, i.name, i.kind, i.kind_label, i.symbol,
+         i.invested_amount, i.current_value, i.unrealized_gain,
+         case when i.invested_amount > 0
+              then round((i.current_value - i.invested_amount) / i.invested_amount * 100, 2)
+              else null end as return_pct,
          c.code as currency_code
-  from public.investments i join public.currencies c on c.id = i.currency_id where i.is_active;
+  from public.investments i join public.currencies c on c.id = i.currency_id
+  where i.is_active;

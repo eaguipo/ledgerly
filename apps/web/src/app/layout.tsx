@@ -18,7 +18,7 @@ export const metadata: Metadata = {
     template: "%s · Ledgerly",
   },
   description:
-    "Track accounts, expenses, transfers and goals across every currency you hold, with your net worth on one screen.",
+    "Track accounts, expenses, transfers, debts, goals and investments across every currency you hold, with what you can actually spend on one screen.",
   applicationName: "Ledgerly",
   openGraph: {
     title: "Ledgerly — personal finance, clearly",

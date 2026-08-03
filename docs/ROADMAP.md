@@ -88,13 +88,23 @@ goals with auto-completing progress.
 
 **Goal:** separate liquid money from investments; handle MP2 / crypto / stocks correctly.
 
-- **Investments:** type (MP2/crypto/stock/asset), invested vs current value; performance =
-  current − invested.
-- **Liquid vs investment separation (Rules 16 & 17):** liquid sums only cash + bank-savings;
-  investments reported separately. Dashboards must never lump these together.
-- **Multi-currency:** report totals grouped **by currency** (no FX conversion in v1 — defer that).
+**Full plan (decisions, SQL, routes, edge cases): [`docs/PHASE-4-PLAN.md`](./PHASE-4-PLAN.md).** As
+in Phase 3 the tables, triggers, RLS policies and views already exist — this phase is RPCs, ledger
+routes (on *both* transports) and UI, plus a display-layer correction to the dashboard. Its three
+open decisions (DECISIONS-NEEDED #2, #5, #7) are still unanswered; the plan recommends one of each.
 
-**Deliverable:** investments tracked separately from spendable cash with basic performance; all
+- **Investments:** ✅ type (MP2/crypto/stock/asset), invested vs current value; performance =
+  current − invested. Values move through dated snapshots rather than by editing a number, because
+  the newest-dated snapshot is what `current_value` is derived from. Types the enum doesn't name
+  (gold, vehicles) are `other_asset` plus a typed-in label — no migration.
+- **Liquid vs investment separation (Rules 16 & 17):** ✅ liquid sums only cash + bank-savings;
+  investments reported separately. Dashboards must never lump these together — the dashboard hero is
+  now *Liquid*, with everything else on its own card, and the trend chart follows the same accounts.
+- **Multi-currency:** ✅ report totals grouped **by currency** (no FX conversion in v1 — defer that).
+  `/portfolios` splits into a table per currency with its own subtotal; sorting applies within a
+  group, so balances in different currencies are never ordered against each other.
+
+**Deliverable:** ✅ investments tracked separately from spendable cash with basic performance; all
 totals correctly grouped by currency.
 
 ## Phase 5 — Reporting, analytics & dashboard

@@ -15,11 +15,22 @@ const VB_H = 120;
 const PAD_Y = 10;
 
 /**
- * Net-worth trend. One series, so no legend — the card title names it.
+ * A balance trend. One series, so no legend — the card title names it.
  * Values are also reachable without hovering: the current figure is the hero
  * above, and the endpoints are labelled under the plot.
+ *
+ * `label` names the series for screen readers. It is a prop rather than the
+ * hardcoded "Net worth" it used to be because the caller decides which accounts
+ * the series covers — the dashboard's is liquid money only (Rule 16), and an
+ * announcement of "net worth" over that would be a plain misstatement.
  */
-export function TrendChart({ points }: { points: TrendPoint[] }) {
+export function TrendChart({
+  points,
+  label = "Balance",
+}: {
+  points: TrendPoint[];
+  label?: string;
+}) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [active, setActive] = useState<number | null>(null);
 
@@ -88,7 +99,7 @@ export function TrendChart({ points }: { points: TrendPoint[] }) {
         // navigation announcing nothing. A focusable group keeps the live
         // region readable.
         role="group"
-        aria-label={`Net worth trend, ${points.length} daily points from ${points[0]?.label} to ${
+        aria-label={`${label} trend, ${points.length} daily points from ${points[0]?.label} to ${
           points[points.length - 1]?.label
         }. Use the left and right arrow keys to read each day.`}
       >

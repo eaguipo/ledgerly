@@ -31,6 +31,12 @@ interface PortfolioRow {
   category: string;
   current_balance: number | string;
   currency_id: string;
+  /**
+   * Generated in the DB as `cash OR (bank AND is_savings)` — Rule 16. Not a
+   * preference and not editable directly: an account becomes liquid by being
+   * cash, or by being a bank account flagged as savings.
+   */
+  is_liquid: boolean;
   currency: CurrencyInfo | CurrencyInfo[] | null;
 }
 
@@ -38,6 +44,15 @@ interface TxnRow {
   txn_date: string;
   signed_amount: number | string;
   currency_id: string;
+  /** Needed to keep the trend on the same accounts the headline figure counts. */
+  portfolio_id: string;
+}
+
+/** One row of v_investment_performance, which reports by code, not currency id. */
+interface InvestmentSummaryRow {
+  invested_amount: number | string;
+  current_value: number | string;
+  currency_code: string;
 }
 
 /** Only the fields the headline debt figures need — see the query below. */
@@ -96,16 +111,24 @@ function shortDate(iso: string) {
  *
  * Same-currency transfers net to zero across the pair, so a currency total only
  * moves on real inflows and outflows. This is measured history, not a forecast.
+ *
+ * `accountIds` scopes it to exactly the accounts the headline figure counts.
+ * Since that figure is liquid money only (Rule 16), a transfer from savings to a
+ * crypto wallet has to register as a fall here — it left the liquid set. Walking
+ * every account's flows instead would net that pair to zero and draw a flat line
+ * under a headline that just dropped.
  */
 function buildTrend(
   currentTotal: number,
   txns: TxnRow[],
   currencyId: string,
   currency: CurrencyInfo | undefined,
+  accountIds: Set<string>,
 ): TrendPoint[] {
   const netByDay = new Map<string, number>();
   for (const t of txns) {
     if (t.currency_id !== currencyId) continue;
+    if (!accountIds.has(t.portfolio_id)) continue;
     netByDay.set(
       t.txn_date,
       (netByDay.get(t.txn_date) ?? 0) + Number(t.signed_amount),
@@ -153,6 +176,7 @@ export default async function DashboardPage() {
     { data: portfolios, error: portfoliosError },
     { data: debts, error: debtsError },
     { data: goals, error: goalsError },
+    { data: investments, error: investmentsError },
   ] = await Promise.all([
     supabase
       .from("profiles")
@@ -162,7 +186,7 @@ export default async function DashboardPage() {
     supabase
       .from("portfolios")
       .select(
-        "id, category, current_balance, currency_id, currency:currencies(id, code, symbol, minor_unit)",
+        "id, category, current_balance, currency_id, is_liquid, currency:currencies(id, code, symbol, minor_unit)",
       )
       .eq("is_archived", false),
     // Settled and written-off debts are excluded here rather than in the render:
@@ -179,6 +203,13 @@ export default async function DashboardPage() {
       .from("goals")
       .select("target_amount, current_amount, currency_id, status")
       .in("status", ["active", "achieved"]),
+    // Invested value is NEVER added to an account balance (Rule 17): money in a
+    // portfolio is spendable, an investment's value is not, and folding the two
+    // into one figure is what this card exists to avoid. The view already
+    // filters to is_active and is security_invoker, so RLS scopes it.
+    supabase
+      .from("v_investment_performance")
+      .select("invested_amount, current_value, currency_code"),
   ]);
 
   // These queries discard their errors into an empty render. Logging them is the
@@ -200,6 +231,9 @@ export default async function DashboardPage() {
   if (goalsError) {
     pageLog.error("dashboard.goals.load_failed", dbError(goalsError));
   }
+  if (investmentsError) {
+    pageLog.error("dashboard.investments.load_failed", dbError(investmentsError));
+  }
 
   const rows = (portfolios ?? []) as unknown as PortfolioRow[];
 
@@ -210,7 +244,7 @@ export default async function DashboardPage() {
   const { data: txns, error: txnsError } = activeIds.length
     ? await supabase
         .from("transactions")
-        .select("txn_date, signed_amount, currency_id")
+        .select("txn_date, signed_amount, currency_id, portfolio_id")
         .eq("is_void", false)
         .in("portfolio_id", activeIds)
         .gte("txn_date", isoDaysAgo(TREND_DAYS))
@@ -245,25 +279,58 @@ export default async function DashboardPage() {
   }
 
   // Totals per currency, and per (currency, category) for the allocation bars.
+  //
+  // `liquid` and `parked` split the same rows two ways rather than one: Rule 16
+  // says only cash and bank SAVINGS are spendable, so a crypto wallet and a
+  // current account both sit outside it. `total` is kept because the allocation
+  // bars and the primary-currency choice below are about the whole account set —
+  // it is deliberately never rendered as a headline figure.
   const byCurrency = new Map<
     string,
-    { total: number; currency: CurrencyInfo; categories: Map<string, number> }
+    {
+      total: number;
+      liquid: number;
+      parked: number;
+      currency: CurrencyInfo;
+      categories: Map<string, number>;
+      liquidIds: Set<string>;
+    }
   >();
   for (const p of rows) {
     const cur = one(p.currency);
     if (!cur) continue;
     const bucket = byCurrency.get(p.currency_id) ?? {
       total: 0,
+      liquid: 0,
+      parked: 0,
       currency: cur,
       categories: new Map<string, number>(),
+      liquidIds: new Set<string>(),
     };
     const amount = Number(p.current_balance);
     bucket.total += amount;
+    if (p.is_liquid) {
+      bucket.liquid += amount;
+      bucket.liquidIds.add(p.id);
+    } else {
+      bucket.parked += amount;
+    }
     bucket.categories.set(
       p.category,
       (bucket.categories.get(p.category) ?? 0) + amount,
     );
     byCurrency.set(p.currency_id, bucket);
+  }
+
+  // Investments report by currency CODE (v_investment_performance joins the
+  // currency in), while accounts are keyed by id. Code is the common key.
+  const investedByCode = new Map<string, { invested: number; current: number }>();
+  for (const inv of (investments ?? []) as unknown as InvestmentSummaryRow[]) {
+    const prev = investedByCode.get(inv.currency_code);
+    investedByCode.set(inv.currency_code, {
+      invested: (prev?.invested ?? 0) + Number(inv.invested_amount),
+      current: (prev?.current ?? 0) + Number(inv.current_value),
+    });
   }
 
   if (byCurrency.size === 0) {
@@ -279,7 +346,7 @@ export default async function DashboardPage() {
         <PageHeader title="Dashboard" />
         <EmptyState
           title="No accounts yet"
-          description="Add your first account and Ledgerly will start tracking balances, spending and net worth across every currency you hold."
+          description="Add your first account and Ledgerly will start tracking balances, spending and what you hold across every currency."
           action={
             <ButtonLink href="/portfolios" variant="primary">
               Add an account
@@ -294,6 +361,13 @@ export default async function DashboardPage() {
   // rates, so summing across currencies would invent a number. Lead with the
   // profile's default currency, fall back to the largest holding, and list the
   // rest alongside rather than folding them in.
+  //
+  // Ranking by total does compare a peso figure against a dollar one, which the
+  // rest of this phase went out of its way to stop doing. It is allowed here
+  // precisely because the comparison is never shown: it picks which currency
+  // leads when the profile has no default, and the reader is never invited to
+  // read the two totals as one. Contrast /portfolios, where group ORDER would
+  // have implied exactly that, so it is alphabetical instead.
   const ranked = [...byCurrency.entries()].sort(
     (a, b) => b[1].total - a[1].total,
   );
@@ -304,10 +378,19 @@ export default async function DashboardPage() {
   const primary = byCurrency.get(primaryId)!;
   const others = ranked.filter(([id]) => id !== primaryId);
 
-  const trend = buildTrend(primary.total, txnRows, primaryId, primary.currency);
+  // Liquid, not total: the headline is what this currency can actually spend
+  // (Rule 16), and the trend below has to walk the same accounts or the chart
+  // contradicts the number above it.
+  const trend = buildTrend(
+    primary.liquid,
+    txnRows,
+    primaryId,
+    primary.currency,
+    primary.liquidIds,
+  );
   const opening = trend[0].value;
   const delta = roundToMinorUnit(
-    primary.total - opening,
+    primary.liquid - opening,
     primary.currency.minor_unit,
   );
 
@@ -358,14 +441,39 @@ export default async function DashboardPage() {
   const goalsAchieved = goalRows.filter((g) => g.status === "achieved").length;
   const hasGoals = goalRows.length > 0;
 
-  // The figures actually rendered. When someone reports "my net worth is wrong",
+  // Everything that is not spendable cash, in the primary currency. Kept as two
+  // separate figures rather than one "non-liquid" total because they are not the
+  // same kind of claim: `parked` is a real balance the ledger maintains, while
+  // `invested` is a valuation that is only as fresh as the last snapshot.
+  const primaryInvested = investedByCode.get(primary.currency.code);
+  const investedNow = primaryInvested?.current ?? 0;
+  const investedCost = primaryInvested?.invested ?? 0;
+  const investedGain = investedNow - investedCost;
+  const hasBeyondLiquid = primary.parked !== 0 || investedNow !== 0;
+
+  // Currencies held only as investments have no account bucket, so they would
+  // otherwise vanish from the page entirely. Surfaced alongside the account
+  // currencies below; they carry no symbol/minor_unit, so formatMoney falls back
+  // to prefixing the code.
+  const investmentOnlyCodes = [...investedByCode.keys()].filter(
+    (code) => ![...byCurrency.values()].some((b) => b.currency.code === code),
+  );
+
+  // The figures actually rendered. When someone reports "my dashboard is wrong",
   // this line says what the page computed and from how many inputs — without it
-  // the only way to check is to re-run the maths by hand.
+  // the only way to check is to re-run the maths by hand. `liquid` and
+  // `accountsTotal` are both logged because the difference between them is the
+  // first thing to check when the headline looks lower than expected.
   pageLog.info("dashboard.load.ok", {
     portfolios: rows.length,
     currencies: byCurrency.size,
     primaryCurrency: primary.currency.code,
-    netWorth: primary.total,
+    liquid: primary.liquid,
+    parked: primary.parked,
+    accountsTotal: primary.total,
+    invested: investedNow,
+    investedGain,
+    investmentOnlyCurrencies: investmentOnlyCodes.length,
     deltaDays: TREND_DAYS,
     delta,
     trendTxns: txnRows.length,
@@ -385,7 +493,7 @@ export default async function DashboardPage() {
     <PageContainer>
       <PageHeader
         title="Dashboard"
-        description="Your position across every account."
+        description="What you can spend, and what you hold beyond it."
       />
 
       <div className="grid gap-5 lg:grid-cols-3">
@@ -393,9 +501,18 @@ export default async function DashboardPage() {
             equal-width digits make a large number look loose. */}
         <Card className="lg:col-span-2">
           <CardBody>
-            <Eyebrow>Net worth · {primary.currency.code}</Eyebrow>
+            {/* "Liquid", not "Net worth". The old figure summed every account —
+                cash, crypto wallets, investment accounts — into one number and
+                called it net worth, which overstates what you can actually
+                spend (Rule 16) and silently omitted the investments table
+                entirely (Rule 17). Those now have their own card below, and
+                nothing on this page adds the two together. */}
+            <Eyebrow>Liquid · {primary.currency.code}</Eyebrow>
             <p className="mt-2 text-[2.75rem] font-semibold leading-none tracking-[-0.035em] text-ink">
-              {formatMoney(primary.total, primary.currency)}
+              {formatMoney(primary.liquid, primary.currency)}
+            </p>
+            <p className="mt-1 text-[13px] text-muted">
+              Cash and savings accounts
             </p>
             <p className="mt-3 text-[13px]">
               {!trendComplete ? (
@@ -429,20 +546,76 @@ export default async function DashboardPage() {
 
             {/* Suppressed rather than approximated: a truncated flow set makes
                 every point wrong, and a wrong chart is worse than no chart. */}
-            {trendComplete ? <TrendChart points={trend} /> : null}
+            {trendComplete ? (
+              <TrendChart points={trend} label="Liquid balance" />
+            ) : null}
           </CardBody>
         </Card>
 
         <Card>
           <CardHeader
             title="Allocation"
-            description={`By category, in ${primary.currency.code}`}
+            description={`Every account, by category, in ${primary.currency.code}`}
           />
           <CardBody>
             <AllocationBars rows={allocation} currency={primary.currency} />
           </CardBody>
         </Card>
       </div>
+
+      {hasBeyondLiquid ? (
+        <Card className="mt-5">
+          <CardHeader
+            title="Beyond spendable cash"
+            description={`In ${primary.currency.code} — reported separately, never added to the figure above`}
+            action={
+              investedNow !== 0 ? (
+                <ButtonLink href="/investments" variant="secondary" size="sm">
+                  View all
+                </ButtonLink>
+              ) : undefined
+            }
+          />
+          <CardBody>
+            <ul className="grid gap-4 sm:grid-cols-3">
+              <li>
+                <Eyebrow>Other accounts</Eyebrow>
+                <p className="mt-1.5 text-lg font-semibold text-ink">
+                  <Money amount={primary.parked} currency={primary.currency} />
+                </p>
+                <p className="mt-0.5 text-xs text-faint">
+                  Crypto, investment and current accounts
+                </p>
+              </li>
+              <li>
+                <Eyebrow>Invested</Eyebrow>
+                <p className="mt-1.5 text-lg font-semibold text-ink">
+                  <Money amount={investedNow} currency={primary.currency} />
+                </p>
+                <p className="mt-0.5 text-xs text-faint">
+                  {investedCost !== 0
+                    ? `from ${formatMoney(investedCost, primary.currency)} invested`
+                    : "No cost basis recorded"}
+                </p>
+              </li>
+              <li>
+                <Eyebrow>Unrealised gain</Eyebrow>
+                <p className="mt-1.5 text-lg font-semibold">
+                  {/* Unrealised: nothing here has become cash, so it is
+                      deliberately absent from the headline and from every
+                      account balance. */}
+                  <Money
+                    amount={investedGain}
+                    currency={primary.currency}
+                    sign={investedGain < 0 ? "negative" : "positive"}
+                  />
+                </p>
+                <p className="mt-0.5 text-xs text-faint">Not cash until you sell</p>
+              </li>
+            </ul>
+          </CardBody>
+        </Card>
+      ) : null}
 
       {hasDebts ? (
         <Card className="mt-5">
@@ -522,7 +695,7 @@ export default async function DashboardPage() {
         </Card>
       ) : null}
 
-      {others.length > 0 ? (
+      {others.length > 0 || investmentOnlyCodes.length > 0 ? (
         <Card className="mt-5">
           <CardHeader
             title="Other currencies"
@@ -530,11 +703,36 @@ export default async function DashboardPage() {
           />
           <CardBody>
             <ul className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-              {others.map(([id, bucket]) => (
-                <li key={id}>
-                  <Eyebrow>{bucket.currency.code}</Eyebrow>
+              {others.map(([id, bucket]) => {
+                // Same split as the primary currency, so no entry here reads as
+                // a spendable figure when part of it isn't.
+                const invested = investedByCode.get(bucket.currency.code);
+                const elsewhere = bucket.parked + (invested?.current ?? 0);
+                return (
+                  <li key={id}>
+                    <Eyebrow>{bucket.currency.code}</Eyebrow>
+                    <p className="mt-1.5 text-lg font-semibold text-ink">
+                      <Money amount={bucket.liquid} currency={bucket.currency} />
+                    </p>
+                    <p className="mt-0.5 text-xs text-faint">
+                      {elsewhere !== 0
+                        ? `liquid · ${formatMoney(elsewhere, bucket.currency)} beyond it`
+                        : "liquid"}
+                    </p>
+                  </li>
+                );
+              })}
+              {investmentOnlyCodes.map((code) => (
+                <li key={code}>
+                  <Eyebrow>{code}</Eyebrow>
                   <p className="mt-1.5 text-lg font-semibold text-ink">
-                    <Money amount={bucket.total} currency={bucket.currency} />
+                    <Money
+                      amount={investedByCode.get(code)?.current ?? 0}
+                      currency={{ code, symbol: null, minor_unit: 2 }}
+                    />
+                  </p>
+                  <p className="mt-0.5 text-xs text-faint">
+                    invested · no account in this currency
                   </p>
                 </li>
               ))}
