@@ -33,6 +33,9 @@ import { Table, Th, Tr, Td } from "@/components/ui/table";
 import { Alert, Badge, EmptyState } from "@/components/ui/feedback";
 import { Money } from "@/components/ui/money";
 import { AllocationBars } from "@/components/charts/allocation-bars";
+import { FlowBars } from "@/components/charts/flow-bars";
+import { bucketFlows, granularityFor } from "./buckets";
+import { TXN_SELECT, isCounted, rowLabel } from "./rows";
 import { Field, Input, Select } from "@/components/ui/field";
 import { Button, buttonClass } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
@@ -59,49 +62,6 @@ function sum<T>(rows: T[], pick: (row: T) => number | string): number {
     return acc + (Number.isFinite(n) ? n : 0);
   }, 0);
 }
-
-/**
- * Whether a transaction is counted in the headline totals.
- *
- * This mirrors `v_cashflow`'s filter exactly, and exists so the list can SAY
- * when a row it shows is not in the total above it. Getting the two out of step
- * would produce a report whose detail contradicts its own summary — so if
- * v_cashflow's rules change, this changes with it.
- */
-function isCounted(t: TransactionRow): boolean {
-  if (!["income", "expense", "debt_payment_made", "debt_payment_received"].includes(t.kind)) {
-    return false; // transfers, opening balances, adjustments
-  }
-  const expense = one(t.expense);
-  if (expense && (expense.debt_id !== null || expense.investment_id !== null)) {
-    return false; // lending out, or buying an asset — not spending
-  }
-  const income = one(t.income);
-  if (income && income.source === "loan_received") {
-    return false; // borrowing is not earning
-  }
-  return true;
-}
-
-/** What to call a row in the transaction list's "category" column. */
-function rowLabel(t: TransactionRow): string {
-  const expense = one(t.expense);
-  if (expense) return one(expense.category)?.name ?? "—";
-  const income = one(t.income);
-  if (income) return incomeSourceDisplay(income.source, income.source_label);
-  return TXN_KIND_LABELS[t.kind] ?? t.kind;
-}
-
-const TXN_KIND_LABELS: Record<string, string> = {
-  income: "Income",
-  expense: "Expense",
-  transfer_in: "Transfer in",
-  transfer_out: "Transfer out",
-  debt_payment_made: "Debt payment",
-  debt_payment_received: "Debt collected",
-  adjustment: "Adjustment",
-  opening_balance: "Opening balance",
-};
 
 function PresetLinks({ query }: { query: ReportQuery }) {
   return (
@@ -250,12 +210,7 @@ export default async function ReportsPage({
       .eq("currency_code", code),
     supabase
       .from("transactions")
-      .select(
-        "id, txn_date, kind, direction, amount, description, " +
-          "currency:currencies!inner(code, symbol, minor_unit), portfolio:portfolios(name), " +
-          "expense:expenses!expenses_txn_kind_fk(debt_id, investment_id, category:expense_categories(name)), " +
-          "income:incomes!incomes_txn_kind_fk(source, source_label)",
-      )
+      .select(TXN_SELECT)
       .eq("is_void", false)
       .eq("currency.code", code)
       .gte("txn_date", query.from)
@@ -316,6 +271,17 @@ export default async function ReportsPage({
 
   const spendRows = [...byCategoryTotals.entries()].map(([label, value]) => ({ label, value }));
   const earnRows = [...bySourceTotals.entries()].map(([label, value]) => ({ label, value }));
+
+  // Bucketed before it reaches the chart: a year of per-day rows is 730 bar
+  // pairs. Amounts are formatted here so the component never needs a currency.
+  const granularity = granularityFor(query);
+  const flowPoints = bucketFlows(cashflowRows, granularity).map((b) => ({
+    label: b.label,
+    inflow: b.inflow,
+    outflow: b.outflow,
+    inflowDisplay: formatMoney(roundToMinorUnit(b.inflow, minor), currency),
+    outflowDisplay: formatMoney(roundToMinorUnit(b.outflow, minor), currency),
+  }));
 
   // Summaries. The balance-style ones are CURRENT, not range-scoped — a balance
   // has no "as of last month" without replaying the ledger, and pretending
@@ -469,6 +435,18 @@ export default async function ReportsPage({
         </Card>
       </div>
 
+      {flowPoints.length > 0 ? (
+        <Card className="mt-5">
+          <CardHeader
+            title="In and out over time"
+            description={`By ${granularity}, in ${code}`}
+          />
+          <CardBody>
+            <FlowBars points={flowPoints} />
+          </CardBody>
+        </Card>
+      ) : null}
+
       <div className="mt-5 grid items-start gap-5 lg:grid-cols-2">
         <Card>
           <CardHeader title="Where it went" description={`Spending by category, in ${code}`} />
@@ -587,6 +565,18 @@ export default async function ReportsPage({
             capHit
               ? `First ${TXN_ROW_LIMIT} of more than ${TXN_ROW_LIMIT} — narrow the range to see them all`
               : `${txnRows.length} in range · ${countedCount} counted in the totals above`
+          }
+          action={
+            txnRows.length > 0 ? (
+              // A plain link, not a fetch: the browser's own download handling
+              // is what makes Content-Disposition work.
+              <a
+                href={`/reports/export?from=${query.from}&to=${query.to}&currency=${code}`}
+                className={buttonClass("secondary", "sm")}
+              >
+                Export CSV
+              </a>
+            ) : undefined
           }
         />
         {capHit ? (

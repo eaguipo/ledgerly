@@ -48,6 +48,13 @@ interface TxnRow {
   portfolio_id: string;
 }
 
+/** One row of v_expense_by_category — spending, by EXPENSE category. */
+interface MonthSpendRow {
+  category_name: string;
+  total: number | string;
+  currency_code: string;
+}
+
 /** One row of v_investment_performance, which reports by code, not currency id. */
 interface InvestmentSummaryRow {
   invested_amount: number | string;
@@ -86,6 +93,12 @@ function one<T>(v: T | T[] | null | undefined): T | undefined {
 function roundToMinorUnit(value: number, minorUnit: number | null | undefined) {
   const factor = 10 ** (minorUnit ?? 2);
   return Math.round(value * factor) / factor;
+}
+
+/** First day of the current month, `YYYY-MM-DD` in local time. */
+function monthStart() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
 }
 
 function isoDaysAgo(days: number) {
@@ -177,6 +190,7 @@ export default async function DashboardPage() {
     { data: debts, error: debtsError },
     { data: goals, error: goalsError },
     { data: investments, error: investmentsError },
+    { data: monthSpend, error: monthSpendError },
   ] = await Promise.all([
     supabase
       .from("profiles")
@@ -210,6 +224,14 @@ export default async function DashboardPage() {
     supabase
       .from("v_investment_performance")
       .select("invested_amount, current_value, currency_code"),
+    // Spending by EXPENSE category for the current month — a different question
+    // from the Allocation card below, which shows PORTFOLIO category (where
+    // money sits, not where it went). Same component, different data.
+    supabase
+      .from("v_expense_by_category")
+      .select("category_name, total, txn_date, currency_code")
+      .gte("txn_date", monthStart())
+      .lte("txn_date", isoDaysAgo(0)),
   ]);
 
   // These queries discard their errors into an empty render. Logging them is the
@@ -233,6 +255,9 @@ export default async function DashboardPage() {
   }
   if (investmentsError) {
     pageLog.error("dashboard.investments.load_failed", dbError(investmentsError));
+  }
+  if (monthSpendError) {
+    pageLog.error("dashboard.month_spend.load_failed", dbError(monthSpendError));
   }
 
   const rows = (portfolios ?? []) as unknown as PortfolioRow[];
@@ -459,6 +484,26 @@ export default async function DashboardPage() {
     (code) => ![...byCurrency.values()].some((b) => b.currency.code === code),
   );
 
+  // This month's spending by expense category, primary currency only — the same
+  // per-currency discipline as every other figure here. v_expense_by_category
+  // already excludes lending and asset purchases, so this is consumption.
+  const spendByCategory = new Map<string, number>();
+  for (const row of (monthSpend ?? []) as unknown as MonthSpendRow[]) {
+    if (row.currency_code !== primary.currency.code) continue;
+    spendByCategory.set(
+      row.category_name,
+      (spendByCategory.get(row.category_name) ?? 0) + Number(row.total),
+    );
+  }
+  const spendRows = [...spendByCategory.entries()].map(([label, value]) => ({
+    label,
+    value,
+  }));
+  const spentThisMonth = roundToMinorUnit(
+    spendRows.reduce((acc, r) => acc + r.value, 0),
+    primary.currency.minor_unit,
+  );
+
   // The figures actually rendered. When someone reports "my dashboard is wrong",
   // this line says what the page computed and from how many inputs — without it
   // the only way to check is to re-run the maths by hand. `liquid` and
@@ -562,6 +607,25 @@ export default async function DashboardPage() {
           </CardBody>
         </Card>
       </div>
+
+      {spendRows.length > 0 ? (
+        <Card className="mt-5">
+          <CardHeader
+            title="Spending this month"
+            // Says "where it went", against Allocation's "where it sits" — the
+            // two cards look alike and answer different questions.
+            description={`${formatMoney(spentThisMonth, primary.currency)} by category, in ${primary.currency.code}`}
+            action={
+              <ButtonLink href="/reports" variant="secondary" size="sm">
+                Full report
+              </ButtonLink>
+            }
+          />
+          <CardBody>
+            <AllocationBars rows={spendRows} currency={primary.currency} />
+          </CardBody>
+        </Card>
+      ) : null}
 
       {hasBeyondLiquid ? (
         <Card className="mt-5">
