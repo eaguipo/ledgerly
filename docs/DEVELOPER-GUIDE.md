@@ -86,6 +86,10 @@ Supabase SQL Editor → New query → paste and run each file, one at a time:
                                     v_investment_performance to expose it
      record_investment_snapshot.sql valuations: upsert-per-day, no future dates,
                                     currency taken from the parent holding
+     money_invested.sql             AFTER create_investment.sql — buying an
+                                    investment posts a real outflow; adds
+                                    expenses.investment_id and excludes asset
+                                    purchases from both report views
      debt_principal_recompute.sql   keeps outstanding_balance right when a principal is edited
 5. db/functions/custom_option_labels.sql   LAST — user-supplied options: adds
      portfolios.category_label / incomes.source_label and re-creates

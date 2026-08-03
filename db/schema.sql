@@ -310,6 +310,13 @@ create table public.expenses (
   merchant       text,
   is_bill        boolean not null default false,
   debt_id        uuid references public.debts(id) on delete set null,
+  -- Marks an expense row as an ASSET PURCHASE, not consumption — set only by
+  -- create_investment()'s funding leg. Both report views exclude it, exactly as
+  -- they exclude debt_id (see db/functions/money_invested.sql).
+  --
+  -- The FOREIGN KEY is added in §12, not here: `investments` is created after
+  -- this table, so an inline reference would fail on a fresh install.
+  investment_id  uuid,
   created_at     timestamptz not null default now(),
   constraint expenses_kind_allowed check (txn_kind = 'expense'),
   constraint expenses_txn_kind_fk
@@ -450,6 +457,17 @@ create index idx_investments_user on public.investments(user_id);
 create index idx_investments_user_kind on public.investments(user_id, kind);
 create trigger trg_investments_updated_at before update on public.investments
   for each row execute function public.set_updated_at();
+
+-- Deferred from §10: expenses.investment_id marks an expense row as an asset
+-- purchase rather than consumption, and both report views exclude it. The column
+-- is declared there and the FK lands here because `expenses` is created first.
+-- `set null` and not cascade — closing an investment must not delete the ledger
+-- row for cash that really did leave the account.
+alter table public.expenses
+  add constraint expenses_investment_id_fkey
+  foreign key (investment_id) references public.investments(id) on delete set null;
+create index idx_expenses_investment
+  on public.expenses(investment_id) where investment_id is not null;
 
 create table public.investment_snapshots (
   id            uuid primary key default gen_random_uuid(),
@@ -931,13 +949,16 @@ create or replace view public.v_cashflow
     and not exists (select 1 from public.incomes i
                      where i.transaction_id = t.id and i.source = 'loan_received')
     and not exists (select 1 from public.expenses e
-                     where e.transaction_id = t.id and e.debt_id is not null)
+                     where e.transaction_id = t.id
+                       and (e.debt_id is not null or e.investment_id is not null))
   group by t.user_id, c.code, t.txn_date, t.direction;
 
--- Same exclusion: money lent out is not a spending category. `debt_id is null`
--- is safe as the marker because Rule 14 / DECISIONS-NEEDED #3 make the debt
--- payment its own ledger kind — a debt-linked EXPENSE only ever comes from
--- create_debt()'s lending leg.
+-- Same exclusion: money lent out is not a spending category, and neither is
+-- money used to buy an asset. `debt_id is null` is safe as the marker because
+-- Rule 14 / DECISIONS-NEEDED #3 make the debt payment its own ledger kind — a
+-- debt-linked EXPENSE only ever comes from create_debt()'s lending leg.
+-- `investment_id is null` is safe for the same reason: its only writer is
+-- create_investment()'s purchase leg (db/functions/money_invested.sql).
 create or replace view public.v_expense_by_category
   with (security_invoker = true) as
   select e.user_id, ec.id as category_id, ec.name as category_name, t.txn_date,
@@ -946,7 +967,7 @@ create or replace view public.v_expense_by_category
   join public.transactions t on t.id = e.transaction_id and t.is_void = false
   join public.expense_categories ec on ec.id = e.category_id
   join public.currencies c on c.id = t.currency_id
-  where e.debt_id is null
+  where e.debt_id is null and e.investment_id is null
   group by e.user_id, ec.id, ec.name, t.txn_date, c.code;
 
 create or replace view public.v_debt_outstanding

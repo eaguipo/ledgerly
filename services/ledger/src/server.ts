@@ -1684,11 +1684,15 @@ app.post("/goals/:id/contributions", async (req, reply) => {
 // ---------------------------------------------------------------------------
 // INVESTMENTS (Phase 4)
 //
-// Nothing here moves money (decision D1). An investment is a statement about
-// what you hold; a snapshot is an observation of what it is worth. Neither posts
-// a ledger row, and `portfolio_id` is an informational "funded from" link rather
-// than a movement — which is why these routes never revalidate a balance and why
-// there is no overdraft guard anywhere below.
+// Creating a holding CAN move money as of db/functions/money_invested.sql:
+// `portfolio_id` is the account that PAID for it, and setting it posts a real
+// outflow against a self-healing 'Money Invested' category. Both report views
+// exclude that row, so buying an asset never reads as spending — the same
+// treatment lending already gets. Leaving it blank is record-only, for a holding
+// that predates the app.
+//
+// Snapshots still move nothing: a valuation is an observation, and gains stay
+// unrealised until you sell. Selling is not modelled yet.
 // ---------------------------------------------------------------------------
 
 // Investments carry their own currency (like debts, and unlike expenses, which
@@ -1966,7 +1970,10 @@ app.post("/investments", async (req, reply) => {
     return reply.code(400).send({ error: error.message });
   }
 
-  const created = (data ?? {}) as { investment_id?: string };
+  const created = (data ?? {}) as {
+    investment_id?: string;
+    transaction_id?: string | null;
+  };
   req.log.info(
     {
       userId,
@@ -1974,7 +1981,11 @@ app.post("/investments", async (req, reply) => {
       kind,
       currencyId,
       invested,
-      linked: portfolioId !== null,
+      paidFrom: portfolioId !== null,
+      // Null means record-only — either no paying account, or a zero cost basis
+      // with nothing to post. Worth logging: it is the difference between an
+      // account balance that moved and one that did not.
+      transactionId: created.transaction_id ?? null,
       custom: kindLabel !== null,
       dbMs: since(startedAt),
     },

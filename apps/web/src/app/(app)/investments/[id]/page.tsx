@@ -210,7 +210,7 @@ export default async function InvestmentDetailPage({
                   </dd>
                 </div>
                 <div>
-                  <dt className="text-muted">Funded from</dt>
+                  <dt className="text-muted">Paid from</dt>
                   <dd className="mt-0.5 text-ink">{funding?.name ?? "—"}</dd>
                 </div>
                 <div>
@@ -231,9 +231,9 @@ export default async function InvestmentDetailPage({
 
               {funding ? (
                 <p className="text-xs text-faint">
-                  Funded from {funding.name} is a note about where the money came
-                  from. No money moved when you recorded this — log the actual
-                  payment as an expense or a transfer.
+                  Paid from {funding.name}. Holdings recorded before this was
+                  supported may show an account here without a matching payment —
+                  the link was informational then.
                 </p>
               ) : null}
 
