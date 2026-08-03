@@ -82,8 +82,19 @@ function GoalsIcon({ className }: IconProps) {
   );
 }
 
+function InvestmentsIcon({ className }: IconProps) {
+  return (
+    <svg {...stroke} className={className} aria-hidden>
+      <path d="M4 19V9M10 19V5M16 19v-6M20.5 19V11" />
+      <path d="M3 19h18" />
+    </svg>
+  );
+}
+
 // Ordered by how money actually moves: where it sits, in, out, between, owed,
-// then what it is being saved toward.
+// then what it is being saved toward. Investments sit after Goals rather than
+// beside Portfolios on purpose — they are not spendable cash (Rule 17), and
+// putting them next to accounts would suggest the two totals add up.
 export const NAV_ITEMS = [
   { href: "/dashboard", label: "Dashboard", Icon: DashboardIcon },
   { href: "/portfolios", label: "Portfolios", Icon: PortfoliosIcon },
@@ -92,4 +103,5 @@ export const NAV_ITEMS = [
   { href: "/transfers", label: "Transfers", Icon: TransfersIcon },
   { href: "/debts", label: "Debts", Icon: DebtsIcon },
   { href: "/goals", label: "Goals", Icon: GoalsIcon },
+  { href: "/investments", label: "Investments", Icon: InvestmentsIcon },
 ] as const;

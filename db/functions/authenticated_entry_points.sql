@@ -1,6 +1,6 @@
 -- ============================================================================
--- do_income / do_expense / do_debt / do_goal — RLS-path entry points for the
--- money RPCs.
+-- do_income / do_expense / do_debt / do_goal / do_investment — RLS-path entry
+-- points for the money RPCs.
 --
 -- Run this in the Supabase SQL Editor AFTER every create_*.sql in this folder —
 -- it calls them all, so they must exist first.
@@ -134,6 +134,52 @@ begin
     v_uid, _goal_id, _amount, _contributed_on, _note);
 end $$;
 
+-- Investments move no money either (Phase 4, decision D1), and take the same
+-- shape for the same reason: create_investment / record_investment_snapshot hold
+-- the validation — the funding account's currency, and the future-date and
+-- wrong-currency guards that stop one bad row pinning current_value forever.
+create or replace function public.do_investment(
+  _name            text,
+  _kind            public.investment_kind,
+  _currency_id     uuid,
+  _invested_amount numeric,
+  _symbol          text    default null,
+  _quantity        numeric default null,
+  _average_cost    numeric default null,
+  _opened_on       date    default current_date,
+  _maturity_date   date    default null,
+  _portfolio_id    uuid    default null,
+  _kind_label      text    default null
+) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare v_uid uuid := auth.uid();
+begin
+  if v_uid is null then
+    raise exception 'Not authenticated' using errcode = '28000';
+  end if;
+  return public.create_investment(
+    v_uid, _name, _kind, _currency_id, _invested_amount, _symbol, _quantity,
+    _average_cost, _opened_on, _maturity_date, _portfolio_id, _kind_label);
+end $$;
+
+create or replace function public.do_investment_snapshot(
+  _investment_id uuid,
+  _market_value  numeric,
+  _as_of_date    date    default current_date,
+  _unit_price    numeric default null,
+  _quantity      numeric default null,
+  _source        text    default null
+) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare v_uid uuid := auth.uid();
+begin
+  if v_uid is null then
+    raise exception 'Not authenticated' using errcode = '28000';
+  end if;
+  return public.record_investment_snapshot(
+    v_uid, _investment_id, _market_value, _as_of_date, _unit_price, _quantity, _source);
+end $$;
+
 -- Replacing the two legacy copies. Same names and argument lists so any existing
 -- caller keeps compiling; the body now delegates and the return type becomes the
 -- same jsonb summary the create_* functions produce.
@@ -197,6 +243,14 @@ grant execute on function public.do_goal(text, numeric, uuid, date, uuid) to aut
 
 revoke all on function public.do_goal_contribution(uuid, numeric, date, text) from public;
 grant execute on function public.do_goal_contribution(uuid, numeric, date, text) to authenticated;
+
+revoke all on function public.do_investment(
+  text, public.investment_kind, uuid, numeric, text, numeric, numeric, date, date, uuid, text) from public;
+grant execute on function public.do_investment(
+  text, public.investment_kind, uuid, numeric, text, numeric, numeric, date, date, uuid, text) to authenticated;
+
+revoke all on function public.do_investment_snapshot(uuid, numeric, date, numeric, numeric, text) from public;
+grant execute on function public.do_investment_snapshot(uuid, numeric, date, numeric, numeric, text) to authenticated;
 
 -- Un-writing-off a debt has to re-derive its status from the payment history,
 -- so the web tier needs this too. Unlike the wrappers above it is NOT security

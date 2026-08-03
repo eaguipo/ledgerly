@@ -82,6 +82,10 @@ Supabase SQL Editor → New query → paste and run each file, one at a time:
      create_debt_payment.sql        debt payments (service-role sibling of do_debt_payment)
      create_goal.sql                goals (validates the linked account's currency)
      create_goal_contribution.sql   goal earmarks + the over-withdrawal guard
+     create_investment.sql          holdings + investments.kind_label; re-creates
+                                    v_investment_performance to expose it
+     record_investment_snapshot.sql valuations: upsert-per-day, no future dates,
+                                    currency taken from the parent holding
      debt_principal_recompute.sql   keeps outstanding_balance right when a principal is edited
 5. db/functions/custom_option_labels.sql   LAST — user-supplied options: adds
      portfolios.category_label / incomes.source_label and re-creates

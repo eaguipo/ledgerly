@@ -88,6 +88,11 @@ goals with auto-completing progress.
 
 **Goal:** separate liquid money from investments; handle MP2 / crypto / stocks correctly.
 
+**Full plan (decisions, SQL, routes, edge cases): [`docs/PHASE-4-PLAN.md`](./PHASE-4-PLAN.md).** As
+in Phase 3 the tables, triggers, RLS policies and views already exist — this phase is RPCs, ledger
+routes (on *both* transports) and UI, plus a display-layer correction to the dashboard. Its three
+open decisions (DECISIONS-NEEDED #2, #5, #7) are still unanswered; the plan recommends one of each.
+
 - **Investments:** type (MP2/crypto/stock/asset), invested vs current value; performance =
   current − invested.
 - **Liquid vs investment separation (Rules 16 & 17):** liquid sums only cash + bank-savings;

@@ -21,3 +21,9 @@ behave. None of these block Phase 0/1; revisit before the phase that touches the
 with real cash — were settled on 2026-08-02 ahead of Phase 3; see
 [`docs/PHASE-3-PLAN.md`](./PHASE-3-PLAN.md) §1. Of what's left, **#1** (admin scope) is the most
 impactful; the rest can wait until their phase.
+
+**#2, #5 and #7 are now live** — Phase 3 is done and Phase 4 is next.
+[`docs/PHASE-4-PLAN.md`](./PHASE-4-PLAN.md) §1 restates them as D1–D4 with a recommendation each and
+the concrete cost of deciding the other way, plus a new **D5** (custom asset types like gold and
+vehicles — reuse the `other_asset` + label pattern rather than adding tables). #7 is the fork that
+shapes the most code: record-only investments are a small CRUD feature, cash-moving ones are not.
