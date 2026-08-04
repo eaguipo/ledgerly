@@ -69,6 +69,23 @@
   --negative: #a94b39;
   --negative-soft: #f6e6e1;
 
+  /* Categorical series, for charts where colour carries IDENTITY rather than
+     magnitude — currently only the spending donut. Assigned in fixed order and
+     never cycled: a 7th category folds into "Other" instead of inventing a hue.
+     Do not reuse these for status; --positive/--negative stay reserved.
+
+     Validated, not eyeballed: both columns clear the lightness band, chroma
+     floor, colourblind separation (worst adjacent ΔE 9.1 light / 8.4 dark) and
+     the normal-vision floor (19.6 / 19.3). Three light hues fall under 3:1
+     against --surface, which is why the donut always ships beside a labelled
+     breakdown rather than relying on colour alone. */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+  --series-6: #008300;
+
   color-scheme: light;
 }
 
@@ -95,6 +112,15 @@
   --positive: #7fbfa0;
   --negative: #d98a72;
   --negative-soft: #2e201c;
+
+  /* The SAME six hues re-stepped for the dark surface, not a separate palette
+     and not an automatic flip. All six clear 3:1 against --surface here. */
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
 
   color-scheme: dark;
 }

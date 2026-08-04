@@ -27,35 +27,60 @@ const PAD_Y = 10;
 export function TrendChart({
   points,
   label = "Balance",
+  baseline,
+  interval = "daily",
 }: {
   points: TrendPoint[];
   label?: string;
+  /**
+   * A value to draw a reference rule at, and to anchor the area fill to.
+   *
+   * Pass 0 for a series that can go negative. Without it the fill runs to the
+   * bottom of the plot, which on a cumulative net line reads as "all of this is
+   * gains" even while the line sits below break-even. With it, the wash is the
+   * distance FROM the baseline in whichever direction — which is what the
+   * reader is actually being asked to see.
+   */
+  baseline?: number;
+  /**
+   * How far apart the points are, for the screen-reader summary. This used to
+   * say "daily" unconditionally; the report buckets by week or month on a long
+   * range, and announcing those as days was simply wrong.
+   */
+  interval?: string;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [active, setActive] = useState<number | null>(null);
 
-  const { line, area, coords } = useMemo(() => {
+  const { line, area, coords, baseY } = useMemo(() => {
     const values = points.map((p) => p.value);
-    const min = Math.min(...values);
-    const max = Math.max(...values);
+    // The baseline has to be inside the scale or the rule lands off-plot and
+    // the fill anchors to an edge — so it joins the extents rather than being
+    // clamped to them afterwards.
+    const min = Math.min(...values, ...(baseline === undefined ? [] : [baseline]));
+    const max = Math.max(...values, ...(baseline === undefined ? [] : [baseline]));
     // A flat series would divide by zero; render it as a centred straight line.
     const span = max - min || 1;
     const lastIndex = Math.max(points.length - 1, 1);
 
+    const yOf = (value: number) =>
+      max === min
+        ? VB_H / 2
+        : VB_H - PAD_Y - ((value - min) / span) * (VB_H - PAD_Y * 2);
+
     const coords = points.map((p, i) => ({
       x: (i / lastIndex) * VB_W,
-      y:
-        max === min
-          ? VB_H / 2
-          : VB_H - PAD_Y - ((p.value - min) / span) * (VB_H - PAD_Y * 2),
+      y: yOf(p.value),
     }));
 
     const line = coords
       .map((c, i) => `${i === 0 ? "M" : "L"}${c.x.toFixed(2)} ${c.y.toFixed(2)}`)
       .join(" ");
-    const area = `${line} L${VB_W} ${VB_H} L0 ${VB_H} Z`;
-    return { line, area, coords };
-  }, [points]);
+    const baseY = baseline === undefined ? null : yOf(baseline);
+    const floor = baseY ?? VB_H;
+    const area = `${line} L${VB_W} ${floor} L0 ${floor} Z`;
+    return { line, area, coords, baseY };
+  }, [points, baseline]);
 
   const pick = useCallback(
     (clientX: number) => {
@@ -99,9 +124,9 @@ export function TrendChart({
         // navigation announcing nothing. A focusable group keeps the live
         // region readable.
         role="group"
-        aria-label={`${label} trend, ${points.length} daily points from ${points[0]?.label} to ${
+        aria-label={`${label} trend, ${points.length} ${interval} points from ${points[0]?.label} to ${
           points[points.length - 1]?.label
-        }. Use the left and right arrow keys to read each day.`}
+        }. Use the left and right arrow keys to read each point.`}
       >
         <svg
           viewBox={`0 0 ${VB_W} ${VB_H}`}
@@ -111,6 +136,21 @@ export function TrendChart({
         >
           {/* 10% wash, never a saturated block. */}
           <path d={area} className="fill-accent opacity-10" />
+          {/* Drawn UNDER the line so the series always wins the crossing, and
+              recessive: it is a reference, not a series. On a net chart this is
+              break-even, and where the line crosses it is the whole story. */}
+          {baseY === null ? null : (
+            <line
+              x1={0}
+              x2={VB_W}
+              y1={baseY}
+              y2={baseY}
+              className="stroke-line-strong"
+              strokeWidth={1}
+              strokeDasharray="4 4"
+              vectorEffect="non-scaling-stroke"
+            />
+          )}
           <path
             d={line}
             fill="none"
