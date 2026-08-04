@@ -34,6 +34,8 @@ import { Alert, Badge, EmptyState } from "@/components/ui/feedback";
 import { Money } from "@/components/ui/money";
 import { AllocationBars } from "@/components/charts/allocation-bars";
 import { FlowBars } from "@/components/charts/flow-bars";
+import { ShareDonut } from "@/components/charts/share-donut";
+import { TrendChart } from "@/components/charts/trend-chart";
 import { bucketFlows, granularityFor } from "./buckets";
 import { TXN_SELECT, isCounted, rowLabel } from "./rows";
 import { Field, Input, Select } from "@/components/ui/field";
@@ -277,6 +279,31 @@ export default async function ReportsPage({
   const spendRows = [...byCategoryTotals.entries()].map(([label, value]) => ({ label, value }));
   const earnRows = [...bySourceTotals.entries()].map(([label, value]) => ({ label, value }));
 
+  // Six slices maximum, so the tail folds into one. Past ~7 classes adjacent
+  // hues stop being tellable apart, and a category worth 0.4% of the month is
+  // not worth a colour — but dropping it outright would make the ring lie about
+  // the total, hence "Other" rather than a truncated list.
+  const DONUT_SLICES = 6;
+  const spendRanked = [...spendRows]
+    .filter((r) => r.value > 0)
+    .sort((a, b) => b.value - a.value);
+  const donutHead = spendRanked.slice(0, DONUT_SLICES - 1);
+  const donutTail = spendRanked.slice(DONUT_SLICES - 1);
+  const donutSlices = [
+    ...donutHead,
+    ...(donutTail.length > 0
+      ? [{
+          label: donutTail.length === 1 ? donutTail[0].label : `Other (${donutTail.length})`,
+          value: donutTail.reduce((s, r) => s + r.value, 0),
+        }]
+      : []),
+  ].map((r) => ({
+    label: r.label,
+    value: r.value,
+    display: formatMoney(roundToMinorUnit(r.value, minor), currency),
+  }));
+  const donutTotal = spendRanked.reduce((s, r) => s + r.value, 0);
+
   // Bucketed before it reaches the chart: a year of per-day rows is 730 bar
   // pairs. Amounts are formatted here so the component never needs a currency.
   const granularity = granularityFor(query);
@@ -287,6 +314,36 @@ export default async function ReportsPage({
     inflowDisplay: formatMoney(roundToMinorUnit(b.inflow, minor), currency),
     outflowDisplay: formatMoney(roundToMinorUnit(b.outflow, minor), currency),
   }));
+
+  // The running position: in minus out, accumulating across the same buckets.
+  // FlowBars answers "how did this month go"; this answers "where am I overall,
+  // and when did it turn" — which nothing else on the page does. Derived from
+  // the same buckets on purpose, so the two charts can never disagree.
+  // Accumulated by reduce rather than a running `let`: this is a render pass,
+  // and a variable reassigned inside a map is exactly what react-hooks
+  // /immutability forbids. Each point carries the total up to and including it.
+  // `raw` is carried alongside so the running total accumulates at full
+  // precision and is rounded only for display. Accumulating the rounded figure
+  // instead would compound a half-centavo per bucket into a visible drift by the
+  // end of a year.
+  const netPoints = flowPoints
+    .reduce<
+      { label: string; raw: number; value: number; display: string }[]
+    >((acc, b) => {
+      const raw = (acc[acc.length - 1]?.raw ?? 0) + b.inflow - b.outflow;
+      const rounded = roundToMinorUnit(raw, minor);
+      return [
+        ...acc,
+        {
+          label: b.label,
+          raw,
+          value: rounded,
+          display: formatMoney(rounded, currency),
+        },
+      ];
+    }, [])
+    .map(({ label, value, display }) => ({ label, value, display }));
+  const netFinal = netPoints[netPoints.length - 1]?.value ?? 0;
 
   // Summaries. The balance-style ones are CURRENT, not range-scoped — a balance
   // has no "as of last month" without replaying the ledger, and pretending
@@ -451,6 +508,41 @@ export default async function ReportsPage({
         </Card>
       ) : null}
 
+      {/* Needs at least two buckets: a single point is not a trend, and a
+          one-point line renders as a dot with an axis. */}
+      {netPoints.length > 1 ? (
+        <Card className="mt-5">
+          <CardHeader
+            title="Running total"
+            description={`Money in minus money out, accumulating across the range, in ${code}`}
+          />
+          <CardBody>
+            <p>
+              <Money
+                amount={netFinal}
+                currency={currency}
+                sign={netFinal < 0 ? "negative" : "positive"}
+                className="text-2xl font-semibold tracking-tight"
+              />
+            </p>
+            <p className="mt-0.5 text-[13px] text-muted">
+              {netFinal >= 0
+                ? "ahead over this range"
+                : "behind over this range"}
+              {" · the dashed line is break-even"}
+            </p>
+            {/* baseline={0} is what makes this honest: without it the wash fills
+                to the floor of the plot and a deficit reads like a gain. */}
+            <TrendChart
+              points={netPoints}
+              label="Running total"
+              baseline={0}
+              interval={granularity === "day" ? "daily" : `${granularity}ly`}
+            />
+          </CardBody>
+        </Card>
+      ) : null}
+
       <div className="mt-5 grid items-start gap-5 lg:grid-cols-2">
         <Card>
           <CardHeader title="Where it went" description={`Spending by category, in ${code}`} />
@@ -458,7 +550,28 @@ export default async function ReportsPage({
             {spendRows.length === 0 ? (
               <EmptyState title="No spending in this range" />
             ) : (
-              <AllocationBars rows={spendRows} currency={currency} />
+              <>
+                {/* Two reads of one number, deliberately. The donut answers
+                    "what shape was this month" at a glance; the bars below rank
+                    close values against each other, which a ring cannot do, and
+                    stand as the labelled table view. Neither is decoration for
+                    the other — drop the bars and precision goes; drop the ring
+                    and the at-a-glance shape goes. */}
+                {donutSlices.length > 1 ? (
+                  <div className="mb-6 border-b border-line pb-6">
+                    <ShareDonut
+                      slices={donutSlices}
+                      total={donutTotal}
+                      totalDisplay={formatMoney(
+                        roundToMinorUnit(donutTotal, minor),
+                        currency,
+                      )}
+                      caption="Total spent"
+                    />
+                  </div>
+                ) : null}
+                <AllocationBars rows={spendRows} currency={currency} />
+              </>
             )}
           </CardBody>
         </Card>
