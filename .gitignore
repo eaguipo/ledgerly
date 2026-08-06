@@ -27,3 +27,6 @@ kubeconfig*.yaml
 
 # Intermediate design artifact
 .design-meta.json
+
+# Claude Code: share skills, keep per-machine permissions local
+.claude/settings.local.json
